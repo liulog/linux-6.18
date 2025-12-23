@@ -41,6 +41,17 @@ struct mcfg_fixup {
 static struct mcfg_fixup mcfg_quirks[] = {
 /*	{ OEM_ID, OEM_TABLE_ID, REV, SEGMENT, BUS_RANGE, ops, cfgres }, */
 
+#ifdef CONFIG_RISCV
+
+#define SPACEMIT_ECAM(table_id, rev, seg) \
+	{ "SPMT  ", table_id, rev, seg, MCFG_BUS_ANY, &al_pcie_ops }
+
+	/* K3 Platform */
+	SPACEMIT_ECAM("K3      ", 1,  0),
+	SPACEMIT_ECAM("K3      ", 1,  1),
+	SPACEMIT_ECAM("K3      ", 1,  2),
+#endif /* RISC-V */
+
 #ifdef CONFIG_ARM64
 
 #define AL_ECAM(table_id, rev, seg, ops) \
