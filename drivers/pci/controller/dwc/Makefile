@@ -52,8 +52,10 @@ obj-$(CONFIG_PCI_HISI) += pcie-hisi.o
 
 ifdef CONFIG_ACPI
 ifdef CONFIG_PCI_QUIRKS
-obj-$(CONFIG_ARM64) += pcie-al.o
-obj-$(CONFIG_ARM64) += pcie-hisi.o
-obj-$(CONFIG_ARM64) += pcie-tegra194-acpi.o
+ifneq ($(or $(CONFIG_ARM64),$(CONFIG_RISCV)), )
+obj-y += pcie-al.o
+obj-y += pcie-hisi.o
+obj-y += pcie-tegra194-acpi.o
+endif
 endif
 endif
