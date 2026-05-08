@@ -1,0 +1,839 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Copyright (c) 2025 Spacemit, Inc */
+
+#include "k3-firefly-common.dtsi"
+
+#ifdef FF_DP1
+#include "k3-dp1.dtsi"
+#endif
+
+/ {
+#ifdef FF_USB30_TYPEA
+ 	vcc5v0_usb30_host0: vcc5v0-usb30-host0-regulator {
+  		compatible = "regulator-fixed";
+                regulator-name = "vcc5v0_usb30_host0";
+                regulator-min-microvolt = <5000000>;
+                regulator-max-microvolt = <5000000>;
+                regulator-always-on;
+                regulator-boot-on;
+                enable-active-high;
+                pinctrl-names = "default";
+		vin-supply = <&vcc5v0_usb30_host1>;
+                status = "okay";
+ 	};
+
+ 	vcc5v0_usb30_host1: vcc5v0-usb30-host1-regulator {
+  		compatible = "regulator-fixed";
+                regulator-name = "vcc5v0_usb30_host1";
+                regulator-min-microvolt = <5000000>;
+                regulator-max-microvolt = <5000000>;
+                regulator-always-on;
+                regulator-boot-on;
+                enable-active-high;
+                gpio = <&gpio K3_GPIO(78) GPIO_ACTIVE_HIGH>;
+                pinctrl-names = "default";
+                pinctrl-0 = <&usb30_vcc5v0_en_cfg>;
+                status = "okay";
+ 	};
+
+ 	vcc5v0_usb_host: vcc5v0-usb-host-regulator {
+  		compatible = "regulator-fixed";
+                regulator-name = "vcc5v0_usb30_host";
+                regulator-min-microvolt = <5000000>;
+                regulator-max-microvolt = <5000000>;
+                regulator-always-on;
+                regulator-boot-on;
+                enable-active-high;
+                gpio = <&gpio K3_GPIO(77) GPIO_ACTIVE_HIGH>;
+                pinctrl-names = "default";
+                pinctrl-0 = <&usb20_vcc5v0_en_cfg>;
+                status = "okay";
+ 	};
+#endif
+
+#ifdef FF_USB20_HUB
+	vcc5v0_hub20: vcc5v0-hub20-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_hub20";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+		regulator-boot-on;
+		enable-active-high;
+		gpio = <&gpio K3_GPIO(2) GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&hub20_pwr_en_cfg>;
+		status = "okay";
+	};
+#endif
+
+#ifdef FF_TYPE_C
+        vcc5v0_usb20_typec: vcc5v0-usb20-typec-regulator {
+                compatible = "regulator-fixed";
+                regulator-name = "vcc5v0_usb20_typec";
+                regulator-min-microvolt = <5000000>;
+                regulator-max-microvolt = <5000000>;
+                enable-active-high;
+                gpio = <&gpio K3_GPIO(60) GPIO_ACTIVE_HIGH>;
+                pinctrl-0 = <&usb20_otg_en_cfg>;
+                pinctrl-names = "default";
+                status = "okay";
+        };
+#endif
+
+#ifdef FF_PCIE
+	vcc3v3_pcie: vcc3v3-pcie {
+		status = "okay";
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_pcie";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio K3_GPIO(73) GPIO_ACTIVE_HIGH>;
+		pinctrl-0 = <&pcie_pwr_en_cfg>;
+                pinctrl-names = "default";
+		startup-delay-us = <5000>;
+		vin-supply = <&vcc12v_dcin>;
+	};
+#endif
+
+#ifdef FF_LEDS
+	firefly_leds: leds {
+		status = "okay";
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 =<&leds_gpio_cfg>, <&red_led_cfg>;
+
+		power_led: power {
+			label = ":power"; 
+			default-state = "on";
+			linux,default-trigger = "ir-power-click";
+			gpios = <&gpio K3_GPIO(56) GPIO_ACTIVE_HIGH>;//blue led
+		};
+
+		user_led: user {
+			label = ":user"; 
+			default-state = "off";
+			linux,default-trigger = "ir-user-click";
+			gpios = <&gpio K3_GPIO(57) GPIO_ACTIVE_HIGH>;//green led
+		};
+
+		user1_led: user1 {
+			label = ":red"; 
+			default-state = "off";
+			linux,default-trigger = "ir-user1-click";
+			gpios = <&gpio K3_GPIO(103) GPIO_ACTIVE_HIGH>;//red led
+		};
+
+	};
+#endif
+
+#ifdef FF_GMAC0
+	usb30_phy_5v: usb30-phy-5v-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "usb30_phy_5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+		regulator-boot-on;
+		enable-active-high;
+		gpio = <&gpio K3_GPIO(53) GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&usb30_phy_5v_en_cfg>;
+		status = "okay";
+	};
+#endif
+
+#ifdef FF_DP1
+/*
+	vcc_lt8711: vcc-lt8711-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_lt8711";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+		enable-active-high;
+		gpio = <&gpio K3_GPIO(85) GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lt8711_en_cfg>;
+		status = "okay";
+	};
+*/
+#endif
+
+#ifdef FF_KEY
+	gpio_keys: gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&boot_key_cfg>, <&power_key_cfg>;
+
+		button-boot {
+			label = "boot";
+			linux,code = <KEY_F12>;
+			gpios = <&gpio K3_GPIO(69) GPIO_ACTIVE_LOW>;
+			debounce-interval = <50>;
+		};
+
+		button-power {
+			label = "power";
+			linux,code = <KEY_POWER>;
+			gpios = <&gpio K3_GPIO(84) GPIO_ACTIVE_LOW>;
+			debounce-interval = <50>;
+		};
+	};
+#endif
+
+	gpio_poweroff: gpio-poweroff {
+		compatible = "gpio-poweroff";
+		gpios = <&gpio K3_GPIO(88) GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&shutdown_pwr_cfg>;
+		/* only drive the pin low until device is off */
+		active-delay-ms = <3000>;
+	};
+};
+
+&i2c1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c1_1_cfg>;
+	status = "okay";
+
+#ifdef FF_RTC
+	pcf8563: pcf8563@51 {
+		compatible = "nxp,pcf8563";
+		reg = <0x51>;
+		#clock-cells = <0>;
+		clock-frequency = <32768>;
+		clock-output-names = "pcf8563";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcf8563_int_cfg>;
+		interrupt-parent = <&gpio>;
+		interrupts = <K3_GPIO(101) IRQ_TYPE_LEVEL_LOW>;
+		wakeup-source;
+	};
+#endif
+};
+
+#ifdef FF_RTC
+// only use pcf8563 rtc
+&rpmi_rtc {
+	status = "disalbed";
+};
+#endif
+
+#ifdef FF_UART0
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_0_cfg>;
+	status = "okay";
+};
+#endif
+
+#ifdef FF_SPI_NOR
+&qspi {
+	pinctrl-names = "default";
+	pinctrl-0 = <&qspi_cfg>;
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <26500000>;
+		m25p,fast-read;
+		broken-flash-reset;
+		status = "okay";
+	};
+};
+#endif
+
+#ifdef FF_SDCARD
+&sdcard {
+	pinctrl-names = "default","uhs";
+	pinctrl-0 = <&mmc1_cfg>;
+	pinctrl-1 = <&mmc1_uhs_cfg>;
+	bus-width = <4>;
+	wp-inverted;
+	cd-gpios = <&gpio 0 4 GPIO_ACTIVE_HIGH>;
+	vmmc-supply = <&p3v3>;
+	vqmmc-supply = <&aldo1>;
+	no-mmc;
+	no-sdio;
+	clock-frequency = <204800000>;
+	spacemit,tx_delaycode = <0x1f>;
+	status = "okay";
+};
+#endif
+
+#ifdef FF_PCIE
+&phy0 {
+	status = "okay";
+};
+
+&phy1 {
+	status = "okay";
+};
+
+&pcie0_rc {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie0_1_cfg>;
+	phys = <&phy0>, <&phy1>;
+	phy-names = "phy0", "phy1";
+
+	num-lanes = <4>;
+	vpcie3v3-supply = <&vcc3v3_pcie>;
+	status = "okay";
+};
+#endif
+
+#ifdef FF_GMAC0
+&usb3_portd_u2phy {
+	status = "okay";
+};
+
+&usb3_portd_u3phy {
+	status = "okay";
+};
+
+&usb3_portd {
+	status = "okay";
+};
+#endif
+
+#ifdef FF_GMAC1
+&ec_master {
+	status = "okay";
+
+        master0 {
+		main-device = <&eth1>;
+        };
+};
+
+&eth1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&gmac1_cfg>;
+
+	max-speed = <1000>;
+	tx-fifo-depth = <8192>;
+	rx-fifo-depth = <8192>;
+	snps,tso;
+	snps,force_sf_dma_mode;
+	phy-mode = "rgmii";
+	phy-handle = <&rgmii1>;
+	snps,reset-gpios = <&gpio 1 5 GPIO_ACTIVE_LOW>;
+	snps,reset-delays-us = <0 20000 100000>;
+
+	spacemit,wake-irq-enable;
+
+	spacemit,clk-tuning-enable;
+	spacemit,clk-tuning-by-delayline;
+	spacemit,tx-phase = <47>;
+	spacemit,rx-phase = <53>;
+
+	status = "okay";
+
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "snps,dwmac-mdio";
+
+		rgmii1: phy@1 {
+			compatible = "ethernet-phy-id001c.c916";
+			reg = <0x1>;
+			device_type = "ethernet-phy";
+		};
+	};
+};
+#endif
+
+&i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_0_cfg>;
+	status = "okay";
+
+#ifdef FF_TYPE_C
+	usbc0: fusb302@22 {
+		compatible = "fcs,fusb302";
+		reg = <0x22>;
+		//interrupt-parent = <&gpio>;
+		//interrupts = <K3_GPIO(58) IRQ_TYPE_LEVEL_LOW>;
+		interrupt-parent = <&saplic>;
+		interrupts = <253 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&usbc0_int_cfg>;
+		vbus-supply = <&vcc5v0_usb20_typec>;
+		status = "okay";
+
+
+		usb_con: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			data-role = "dual";
+			power-role = "dual";
+			try-power-role = "sink";
+			op-sink-microwatt = <1000000>;
+			sink-pdos =
+				<PDO_FIXED(5000, 1000, PDO_FIXED_USB_COMM)>;
+			source-pdos =
+				<PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					usbc0_role_sw: endpoint@0 {
+						remote-endpoint = <&dwc3_0_role_switch>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					usbc0_orien_sw: endpoint {
+						remote-endpoint = <&u2phy0_orientation_switch>;
+					};
+				};
+			};
+
+		};
+	};
+#endif
+};
+
+&i2c5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c5_2_cfg>;
+	status = "okay";
+
+#ifdef FF_WATCHDOG
+	// watch dog on mother base
+	pc9202_base: pc9202_base@3c {
+		status = "okay";
+		compatible = "firefly,pc9202";
+		reg = <0x3c>;
+		index = <1>;
+		driver-names = "wdt_base";
+	};
+#endif
+};
+
+#ifdef FF_USB20_HUB
+&usb2_host_u2phy {
+	status = "okay";
+};
+
+// USB2.0 TYPE-A
+&usb2_host {
+	status = "okay";
+};
+#endif
+
+#ifdef FF_TYPE_C
+&usb3_porta_u2phy {
+	status = "okay";
+};
+
+&usb3_porta_u3phy {
+	status = "okay";
+
+	orientation-switch;
+
+	port {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		u2phy0_orientation_switch: endpoint@0 {
+			reg = <0>;
+			remote-endpoint = <&usbc0_orien_sw>;
+		};
+	};
+
+};
+
+&usb3_porta {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+	monitor-vbus;
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@0 {
+			reg = <0x0>;
+			dwc3_0_role_switch: endpoint {
+				remote-endpoint = <&usbc0_role_sw>;
+			};
+		};
+	};
+};
+#endif
+
+#ifdef FF_USB30_TYPEA
+//host0
+&usb3_portc_u2phy {
+	status = "okay";
+};
+
+&usb3_portc_u3phy {
+	status = "okay";
+};
+
+&usb3_portc {
+	status = "okay";
+};
+
+//host1
+&usb3_portb_u2phy {
+	status = "okay";
+};
+
+&usb3_portb_u3phy {
+	status = "okay";
+};
+
+&usb3_portb {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/* VL817 USB2.0 hub (4 ports) */
+	hub_2_0: hub@1 {
+		compatible = "usb2109,2817";
+		reg = <1>;
+		peer-hub = <&hub_3_0>;
+		/* GPIO53(MIPI_CSI3_PWDN) reserved for HUB 3V3 RST,
+		 * now reset will be done by HW */
+	};
+
+	/* VL817 USB3.0 hub (4 ports) */
+	hub_3_0: hub@2 {
+		compatible = "usb2109,817";
+		reg = <2>;
+		peer-hub = <&hub_2_0>;
+		/* GPIO53(MIPI_CSI3_PWDN) reserved for HUB 3V3 RST,
+		 * now reset will be done by HW */
+	};
+};
+#endif
+
+#ifdef FF_FAN
+&i2c6 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c6_1_cfg>;
+	status = "okay";
+
+	ctf2301: ctf2301@4c {
+		compatible = "sensylink,ctf2301";
+		reg = <0x4c>;
+		#cooling-cells = <2>;
+	};
+};
+#endif
+
+
+#ifdef FF_DP1
+&i2c3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3_2_cfg>;
+	i2c-scl-rising-time-ns = <475>;
+	i2c-scl-falling-time-ns = <26>;
+	status = "okay";
+
+	lt2404: lt2404@29 {
+		compatible = "lontium,lt2404";
+		reg = <0x29>;
+		power-gpios = <&gpio K3_GPIO(85) GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio K3_GPIO(74) GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
+
+&dp1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dp1_3_cfg>;
+	status = "okay";
+};
+
+&dpu1_crtc0 {
+	memory-region = <&dpu_resv1>;
+	status = "okay";
+};
+
+&adma3 {
+	status = "okay";
+};
+
+&ri2s3 {
+	status = "okay";
+};
+
+&sound_card_dp1 {
+	status = "okay";
+	simple-audio-card,name = "snd-dp1";
+	simple-audio-card,mclk-fs = <512>;
+	simple-audio-card,dai-link@0 {
+		format = "left_j";
+		frame-master = <&dp1_link_cpu>;
+		bitclock-master = <&dp1_link_cpu>;
+		dp1_link_codec: codec {
+			playback-only;
+			sound-dai = <&dp1>;
+		};
+	};
+};
+#endif
+
+&pinctrl {
+#ifdef FF_GMAC0
+        usb30_phy_5v_en_cfg: usb30-phy-5v-en-cfg {
+                usb30-phy-5v-en-pin {
+                        pinmux = <K3_PADCONF(53, 0)>;
+
+                        bias-disable;
+                        drive-strength = <25>;
+                        power-source = <1800>;
+                };
+        };
+#endif
+
+#ifdef FF_GMAC1
+	gmac1-cfg {
+		/delete-node/ gmac1-2-pins;
+		/delete-node/ gmac1-4-pins;
+		/delete-node/ gmac1-5-pins;
+
+		gmac1-0-pins {
+			power-source = <1800>;
+		};
+
+		gmac1-1-pins {
+			power-source = <1800>;
+		};
+
+		gmac1-3-pins {
+			power-source = <1800>;
+		};
+
+		gmac1-6-pins {
+			pinmux = <K3_PADCONF(37, 0)>;
+
+			bias-disable;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+#endif
+
+	i2c0-0-cfg {
+		i2c0-0-pins {
+			power-source = <3300>;
+		};
+	};
+
+	i2c1-1-cfg {
+		i2c1-0-pins {
+			power-source = <1800>;
+		};
+	};
+
+	i2c2-1-cfg {
+		i2c2-0-pins {
+			power-source = <1800>;
+		};
+	};
+
+	i2c3-2-cfg {
+		i2c3-0-pins {
+			power-source = <3300>;
+		};
+	};
+
+	i2c5-2-cfg {
+		i2c5-0-pins {
+			power-source = <3300>;
+		};
+	};
+
+	i2c6-1-cfg {
+		i2c6-0-pins {
+			power-source = <3300>;
+		};
+	};
+
+#ifdef FF_LEDS
+	leds_gpio_cfg: leds-gpio-cfg {
+		leds-gpio-pins {
+			pinmux = <K3_PADCONF(56, 0)>,
+				 <K3_PADCONF(57, 0)>;
+
+			bias-disable;			/* normal bias disable */
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+
+        red_led_cfg: red-led-cfg {
+                red-led-pins {
+                        pinmux = <K3_PADCONF(103, 0)>;
+
+                        bias-disable;
+                        drive-strength = <25>;
+                        power-source = <1800>;
+                };
+        };
+#endif
+
+#ifdef FF_DP1
+	dp1-3-cfg {
+		dp1-0-pins {
+			power-source = <1800>;
+		};
+	};
+
+	lt8711_en_cfg: lt8711-en-cfg {
+		lt8711-en-pin {
+			pinmux = <K3_PADCONF(85, 0)>;
+
+			bias-disable;
+			drive-strength = <25>;
+			power-source = <3300>;
+		};
+	};
+
+#endif
+
+#ifdef FF_PCIE
+	pcie_pwr_en_cfg: pcie-pwr-en-cfg {
+		pcie-pwr-en-pin {
+			pinmux = <K3_PADCONF(73, 0)>;
+                        
+			bias-disable;			/* normal bias disable */
+			drive-strength = <25>;		/* DS8 */
+			power-source = <1800>;
+		};
+	};
+
+	pcie0-1-cfg {
+		pcie0-0-pins {
+			pinmux = <K3_PADCONF(79, 5)>,	/* pcie0 perst */
+				 <K3_PADCONF(80, 5)>,	/* pcie0 wake */
+				 <K3_PADCONF(81, 5)>;	/* pcie0 clkreq */
+
+			bias-pull-up;
+			drive-strength = <38>;
+			power-source = <3300>;
+		};
+	};
+#endif
+
+#ifdef FF_SPI_NOR
+	qspi-cfg {
+		qspi-pins {
+			power-source = <1800>;
+		};
+	};
+
+	qspi-cs0-cfg {
+		qspi-cs0-pins {
+			power-source = <1800>;
+		};
+	};
+#endif
+
+#ifdef FF_USB30_TYPEA
+	usb20_vcc5v0_en_cfg: usb20-vcc5v0-en-cfg {
+		pinmux = <K3_PADCONF(77, 0)>;
+
+		bias-disable;			/* normal bias disable */
+		drive-strength = <25>;		/* DS8 */
+		power-source = <3300>;
+	};
+
+	usb30_vcc5v0_en_cfg: usb30-vcc5v0-en-cfg {
+		pinmux = <K3_PADCONF(78, 0)>;
+
+		bias-disable;			/* normal bias disable */
+		drive-strength = <25>;		/* DS8 */
+		power-source = <3300>;
+	};
+#endif
+
+#ifdef FF_USB20_HUB
+	hub20_pwr_en_cfg: hub20-pwr-en-cfg {
+		hub20-pwr-en-pin {
+			pinmux = <K3_PADCONF(2, 0)>;
+
+			bias-disable;			/* normal bias disable */
+			drive-strength = <25>;		/* DS8 */
+			power-source = <1800>;
+		};
+	};
+#endif
+
+#ifdef FF_TYPE_C
+	usb20_otg_en_cfg: usb20-otg-en-cfg {
+		usb20-otg-en-pin {
+			pinmux = <K3_PADCONF(60, 0)>;
+
+			bias-disable;			/* normal bias disable */
+			drive-strength = <25>;		/* DS8 */
+			power-source = <1800>;
+		};
+	};
+
+	usbc0_int_cfg: usbc0-int-cfg {
+		usbc0-int-pin {
+			pinmux = <K3_PADCONF(58, 0)>;
+
+			bias-pull-up;			/* normal pull-up */
+			drive-strength = <25>;		/* DS8 */
+			power-source = <1800>;
+		};
+	};
+#endif
+
+#ifdef FF_RTC
+	pcf8563_int_cfg: pcf8563-int-cfg {
+		pcf8563-int-pin {
+			pinmux = <K3_PADCONF(101, 0)>;
+
+			bias-pull-up;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+#endif
+
+#ifdef FF_KEY
+	boot_key_cfg: boot-key-cfg {
+		boot-key-pin {
+			pinmux = <K3_PADCONF(69, 0)>;
+
+			bias-disable;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+
+	power_key_cfg: power-key-cfg {
+		power-key-pin {
+			pinmux = <K3_PADCONF(84, 0)>;
+
+			bias-disable;
+			drive-strength = <25>;
+			power-source = <3300>;
+		};
+	};
+#endif
+	shutdown_pwr_cfg: shutdown-pwr-cfg {
+		shutdown-pwr-pin {
+			pinmux = <K3_PADCONF(88, 0)>;
+
+			bias-pull-up;
+			drive-strength = <25>;
+			power-source = <3300>;
+		};
+	};
+};
