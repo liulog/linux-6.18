@@ -364,6 +364,16 @@
 			power-source = <1800>;
 		};
 	};
+
+	bt_enable_cfg: bt-enable-cfg {
+		bt-enable-pins {
+			pinmux = <K3_PADCONF(132, 1)>;
+
+			bias-pull-up;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
 };
 
 &uart0 {
@@ -380,7 +390,7 @@
 	bluetooth {
 		compatible = "realtek,rtl8852bs-bt";
 		pinctrl-names = "default";
-		pinctrl-0 = <&bt_hostwake_cfg>;
+		pinctrl-0 = <&bt_hostwake_cfg &bt_enable_cfg>;
 		device-wake-gpios = <&gpio 1 31 GPIO_ACTIVE_HIGH>;
 		enable-gpios = <&gpio 2 29 GPIO_ACTIVE_HIGH>;
 		interrupts-extended = <&pinctrl 62 IRQ_TYPE_EDGE_FALLING>;
