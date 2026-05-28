@@ -30,6 +30,7 @@
  */
 int is_cacheable_safe(const void *addr)
 {
+#if 0
 	unsigned long vaddr = (unsigned long)addr;
 
 	/* Kernel direct mapped memory - always cacheable */
@@ -59,7 +60,7 @@ int is_cacheable_safe(const void *addr)
 		/* Normal vmalloc - cacheable */
 		return 1;
 	}
-
+#endif
 	/* Unknown kernel region - assume non-cacheable for safety */
 	return 0;
 }
