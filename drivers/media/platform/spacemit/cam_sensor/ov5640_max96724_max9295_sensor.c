@@ -11,15 +11,22 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/ioctl.h>
+#include <linux/media-bus-format.h>
 #include <linux/miscdevice.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <media/media-entity.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-subdev.h>
 
 #define OV5640_IOC_MAGIC			'V'
 #define OV5640_IOCTL_POWER_ON			_IO(OV5640_IOC_MAGIC, 1)
@@ -40,6 +47,10 @@
 #define MAX96724_PIPE_X_SRC_0_MAP_ADDR	0x090d
 #define MAX9295_GPIO_FRAME_TRIGGER	0x02d3
 #define OV5640_XCLK_FREQ		24000000
+#define OV5640_GMSL_LINK_FREQ		600000000ULL
+#define OV5640_GMSL_PIXEL_RATE		74250000
+#define OV5640_GMSL_WIDTH		1280
+#define OV5640_GMSL_HEIGHT		720
 
 struct regval_list {
 	u16 addr;
@@ -57,6 +68,11 @@ struct ov5640_gmsl {
 	struct clk *xclk;
 	struct regulator *vdd;
 	struct miscdevice miscdev;
+	struct v4l2_subdev sd;
+	struct media_pad pad;
+	struct v4l2_ctrl_handler ctrl_handler;
+	struct v4l2_ctrl *link_freq;
+	struct v4l2_mbus_framefmt fmt;
 	u8 des_addr;
 	u8 ser_base_addr;
 	u8 link_lock_status;
@@ -67,7 +83,16 @@ struct ov5640_gmsl {
 
 static struct ov5640_gmsl *global_ov5640_gmsl;
 
-static const struct regval_list ov5640_init_setting[] = {
+static const s64 ov5640_gmsl_link_freq_menu[] = {
+	OV5640_GMSL_LINK_FREQ,
+};
+
+static inline struct ov5640_gmsl *to_ov5640_gmsl(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct ov5640_gmsl, sd);
+}
+
+static const struct regval_list ov5640_1080p_init_setting[] = {
 	{0x3103, 0x11, 0, 0},
 	{0x3008, 0x82, 0, 10},
 	{0x3008, 0x42, 0, 0},
@@ -75,9 +100,9 @@ static const struct regval_list ov5640_init_setting[] = {
 	{0x3017, 0x00, 0, 0},
 	{0x3018, 0x00, 0, 0},
 	{0x3034, 0x18, 0, 0},
-	{0x3035, 0x11, 0, 0},
-	{0x3036, 0x54, 0, 0},
-	{0x3037, 0x13, 0, 0},
+	{0x3035, 0x21, 0, 0},
+	{0x3036, 0x69, 0, 0},
+	{0x3037, 0x03, 0, 0},
 	{0x3108, 0x01, 0, 0},
 	{0x3630, 0x36, 0, 0},
 	{0x3631, 0x0e, 0, 0},
@@ -116,47 +141,47 @@ static const struct regval_list ov5640_init_setting[] = {
 	{0x3c09, 0x1c, 0, 0},
 	{0x3c0a, 0x9c, 0, 0},
 	{0x3c0b, 0x40, 0, 0},
-	{0x3820, 0x40, 0, 0},
-	{0x3821, 0x06, 0, 0},
-	{0x3814, 0x11, 0, 0},
-	{0x3815, 0x11, 0, 0},
-	{0x3800, 0x01, 0, 0},
-	{0x3801, 0x50, 0, 0},
-	{0x3802, 0x01, 0, 0},
-	{0x3803, 0xb2, 0, 0},
-	{0x3804, 0x08, 0, 0},
-	{0x3805, 0xef, 0, 0},
-	{0x3806, 0x05, 0, 0},
-	{0x3807, 0xf1, 0, 0},
-	{0x3808, 0x07, 0, 0},
-	{0x3809, 0x80, 0, 0},
-	{0x380a, 0x04, 0, 0},
-	{0x380b, 0x38, 0, 0},
-	{0x380c, 0x09, 0, 0},
-	{0x380d, 0xc4, 0, 0},
-	{0x380e, 0x04, 0, 0},
-	{0x380f, 0x60, 0, 0},
+	{0x3820, 0x41, 0, 0},
+	{0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0},
+	{0x3815, 0x31, 0, 0},
+	{0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0},
+	{0x3802, 0x00, 0, 0},
+	{0x3803, 0x04, 0, 0},
+	{0x3804, 0x0a, 0, 0},
+	{0x3805, 0x3f, 0, 0},
+	{0x3806, 0x07, 0, 0},
+	{0x3807, 0x9b, 0, 0},
+	{0x3808, 0x05, 0, 0},
+	{0x3809, 0x00, 0, 0},
+	{0x380a, 0x02, 0, 0},
+	{0x380b, 0xd0, 0, 0},
+	{0x380c, 0x07, 0, 0},
+	{0x380d, 0x68, 0, 0},
+	{0x380e, 0x03, 0, 0},
+	{0x380f, 0xd8, 0, 0},
 	{0x3810, 0x00, 0, 0},
 	{0x3811, 0x10, 0, 0},
 	{0x3812, 0x00, 0, 0},
-	{0x3813, 0x04, 0, 0},
+	{0x3813, 0x06, 0, 0},
 	{0x3618, 0x04, 0, 0},
 	{0x3612, 0x2b, 0, 0},
-	{0x3708, 0x64, 0, 0},
-	{0x3709, 0x12, 0, 0},
-	{0x370c, 0x00, 0, 0},
-	{0x3a02, 0x04, 0, 0},
-	{0x3a03, 0x60, 0, 0},
+	{0x3708, 0x40, 0, 0},
+	{0x3709, 0x52, 0, 0},
+	{0x370c, 0x03, 0, 0},
+	{0x3a02, 0x03, 0, 0},
+	{0x3a03, 0xd8, 0, 0},
 	{0x3a08, 0x01, 0, 0},
-	{0x3a09, 0x50, 0, 0},
-	{0x3a0a, 0x01, 0, 0},
-	{0x3a0b, 0x18, 0, 0},
+	{0x3a09, 0x27, 0, 0},
+	{0x3a0a, 0x00, 0, 0},
+	{0x3a0b, 0xf6, 0, 0},
 	{0x3a0e, 0x03, 0, 0},
 	{0x3a0d, 0x04, 0, 0},
-	{0x3a14, 0x04, 0, 0},
-	{0x3a15, 0x60, 0, 0},
+	{0x3a14, 0x03, 0, 0},
+	{0x3a15, 0xd8, 0, 0},
 	{0x4001, 0x02, 0, 0},
-	{0x4004, 0x06, 0, 0},
+	{0x4004, 0x02, 0, 0},
 	{0x3000, 0x00, 0, 0},
 	{0x3002, 0x1c, 0, 0},
 	{0x3004, 0xff, 0, 0},
@@ -304,6 +329,245 @@ static const struct regval_list ov5640_init_setting[] = {
 	{0x3a1e, 0x26, 0, 0},
 	{0x3a11, 0x60, 0, 0},
 	{0x3a1f, 0x14, 0, 5},
+};
+
+static const struct regval_list ov5640_720p_init_setting[] = {
+	{0x3103, 0x11, 0, 0},
+	{0x3008, 0x82, 0, 10},
+	{0x3008, 0x42, 0, 0},
+	{0x3103, 0x03, 0, 0},
+	{0x3017, 0x00, 0, 0},
+	{0x3018, 0x00, 0, 0},
+	{0x3034, 0x18, 0, 0},
+	{0x3035, 0x11, 0, 0},
+	{0x3036, 0x54, 0, 0},
+	{0x3037, 0x13, 0, 0},
+	{0x3108, 0x01, 0, 0},
+	{0x3630, 0x36, 0, 0},
+	{0x3631, 0x0e, 0, 0},
+	{0x3632, 0xe2, 0, 0},
+	{0x3633, 0x12, 0, 0},
+	{0x3621, 0xe0, 0, 0},
+	{0x3704, 0xa0, 0, 0},
+	{0x3703, 0x5a, 0, 0},
+	{0x3715, 0x78, 0, 0},
+	{0x3717, 0x01, 0, 0},
+	{0x370b, 0x60, 0, 0},
+	{0x3705, 0x1a, 0, 0},
+	{0x3905, 0x02, 0, 0},
+	{0x3906, 0x10, 0, 0},
+	{0x3901, 0x0a, 0, 0},
+	{0x3731, 0x12, 0, 0},
+	{0x3600, 0x08, 0, 0},
+	{0x3601, 0x33, 0, 0},
+	{0x302d, 0x60, 0, 0},
+	{0x3620, 0x52, 0, 0},
+	{0x371b, 0x20, 0, 0},
+	{0x471c, 0x50, 0, 0},
+	{0x3a13, 0x43, 0, 0},
+	{0x3a18, 0x00, 0, 0},
+	{0x3a19, 0xf8, 0, 0},
+	{0x3635, 0x13, 0, 0},
+	{0x3636, 0x03, 0, 0},
+	{0x3634, 0x40, 0, 0},
+	{0x3622, 0x01, 0, 0},
+	{0x3c01, 0x34, 0, 0},
+	{0x3c04, 0x28, 0, 0},
+	{0x3c05, 0x98, 0, 0},
+	{0x3c06, 0x00, 0, 0},
+	{0x3c07, 0x07, 0, 0},
+	{0x3c08, 0x00, 0, 0},
+	{0x3c09, 0x1c, 0, 0},
+	{0x3c0a, 0x9c, 0, 0},
+	{0x3c0b, 0x40, 0, 0},
+	{0x3820, 0x41, 0, 0},
+	{0x3821, 0x07, 0, 0},
+	{0x3814, 0x31, 0, 0},
+	{0x3815, 0x31, 0, 0},
+	{0x3800, 0x00, 0, 0},
+	{0x3801, 0x00, 0, 0},
+	{0x3802, 0x00, 0, 0},
+	{0x3803, 0xfa, 0, 0},
+	{0x3804, 0x0a, 0, 0},
+	{0x3805, 0x3f, 0, 0},
+	{0x3806, 0x06, 0, 0},
+	{0x3807, 0xa9, 0, 0},
+	{0x3808, 0x05, 0, 0},
+	{0x3809, 0x00, 0, 0},
+	{0x380a, 0x02, 0, 0},
+	{0x380b, 0xd0, 0, 0},
+	{0x380c, 0x07, 0, 0},
+	{0x380d, 0x64, 0, 0},
+	{0x380e, 0x02, 0, 0},
+	{0x380f, 0xe4, 0, 0},
+	{0x3810, 0x00, 0, 0},
+	{0x3811, 0x10, 0, 0},
+	{0x3812, 0x00, 0, 0},
+	{0x3813, 0x04, 0, 0},
+	{0x3618, 0x00, 0, 0},
+	{0x3612, 0x29, 0, 0},
+	{0x3708, 0x64, 0, 0},
+	{0x3709, 0x52, 0, 0},
+	{0x370c, 0x03, 0, 0},
+	{0x3a02, 0x02, 0, 0},
+	{0x3a03, 0xe4, 0, 0},
+	{0x3a08, 0x01, 0, 0},
+	{0x3a09, 0xbc, 0, 0},
+	{0x3a0a, 0x01, 0, 0},
+	{0x3a0b, 0x72, 0, 0},
+	{0x3a0e, 0x01, 0, 0},
+	{0x3a0d, 0x02, 0, 0},
+	{0x3a14, 0x02, 0, 0},
+	{0x3a15, 0xe4, 0, 0},
+	{0x4001, 0x02, 0, 0},
+	{0x4004, 0x02, 0, 0},
+	{0x3000, 0x00, 0, 0},
+	{0x3002, 0x1c, 0, 0},
+	{0x3004, 0xff, 0, 0},
+	{0x3006, 0xc3, 0, 0},
+	{0x300e, 0x45, 0, 0},
+	{0x302e, 0x08, 0, 0},
+	{0x4300, 0x32, 0, 0},
+	{0x501f, 0x00, 0, 0},
+	{0x4713, 0x02, 0, 0},
+	{0x4407, 0x04, 0, 0},
+	{0x440e, 0x00, 0, 0},
+	{0x460b, 0x37, 0, 0},
+	{0x460c, 0x20, 0, 0},
+	{0x4837, 0x0a, 0, 0},
+	{0x3824, 0x04, 0, 0},
+	{0x5000, 0xa7, 0, 0},
+	{0x5001, 0x83, 0, 0},
+	{0x5180, 0xff, 0, 0},
+	{0x5181, 0xf2, 0, 0},
+	{0x5182, 0x00, 0, 0},
+	{0x5183, 0x14, 0, 0},
+	{0x5184, 0x25, 0, 0},
+	{0x5185, 0x24, 0, 0},
+	{0x5186, 0x09, 0, 0},
+	{0x5187, 0x09, 0, 0},
+	{0x5188, 0x09, 0, 0},
+	{0x5189, 0x75, 0, 0},
+	{0x518a, 0x54, 0, 0},
+	{0x518b, 0xe0, 0, 0},
+	{0x518c, 0xb2, 0, 0},
+	{0x518d, 0x42, 0, 0},
+	{0x518e, 0x3d, 0, 0},
+	{0x518f, 0x56, 0, 0},
+	{0x5190, 0x46, 0, 0},
+	{0x5191, 0xf8, 0, 0},
+	{0x5192, 0x04, 0, 0},
+	{0x5193, 0x70, 0, 0},
+	{0x5194, 0xf0, 0, 0},
+	{0x5195, 0xf0, 0, 0},
+	{0x5196, 0x03, 0, 0},
+	{0x5197, 0x01, 0, 0},
+	{0x5198, 0x04, 0, 0},
+	{0x5199, 0x12, 0, 0},
+	{0x519a, 0x04, 0, 0},
+	{0x519b, 0x00, 0, 0},
+	{0x519c, 0x06, 0, 0},
+	{0x519d, 0x82, 0, 0},
+	{0x519e, 0x38, 0, 0},
+	{0x5381, 0x1e, 0, 0},
+	{0x5382, 0x5b, 0, 0},
+	{0x5383, 0x08, 0, 0},
+	{0x5384, 0x0a, 0, 0},
+	{0x5385, 0x7e, 0, 0},
+	{0x5386, 0x88, 0, 0},
+	{0x5387, 0x7c, 0, 0},
+	{0x5388, 0x6c, 0, 0},
+	{0x5389, 0x10, 0, 0},
+	{0x538a, 0x01, 0, 0},
+	{0x538b, 0x98, 0, 0},
+	{0x5300, 0x08, 0, 0},
+	{0x5301, 0x30, 0, 0},
+	{0x5302, 0x10, 0, 0},
+	{0x5303, 0x00, 0, 0},
+	{0x5304, 0x08, 0, 0},
+	{0x5305, 0x30, 0, 0},
+	{0x5306, 0x08, 0, 0},
+	{0x5307, 0x16, 0, 0},
+	{0x5309, 0x08, 0, 0},
+	{0x530a, 0x30, 0, 0},
+	{0x530b, 0x04, 0, 0},
+	{0x530c, 0x06, 0, 0},
+	{0x5480, 0x01, 0, 0},
+	{0x5580, 0x02, 0, 0},
+	{0x5583, 0x40, 0, 0},
+	{0x5584, 0x10, 0, 0},
+	{0x5589, 0x10, 0, 0},
+	{0x558a, 0x00, 0, 0},
+	{0x558b, 0xf8, 0, 0},
+	{0x5800, 0x23, 0, 0},
+	{0x5801, 0x14, 0, 0},
+	{0x5802, 0x0f, 0, 0},
+	{0x5803, 0x0f, 0, 0},
+	{0x5804, 0x12, 0, 0},
+	{0x5805, 0x26, 0, 0},
+	{0x5806, 0x0c, 0, 0},
+	{0x5807, 0x08, 0, 0},
+	{0x5808, 0x05, 0, 0},
+	{0x5809, 0x05, 0, 0},
+	{0x580a, 0x08, 0, 0},
+	{0x580b, 0x0d, 0, 0},
+	{0x580c, 0x08, 0, 0},
+	{0x580d, 0x03, 0, 0},
+	{0x580e, 0x00, 0, 0},
+	{0x580f, 0x00, 0, 0},
+	{0x5810, 0x03, 0, 0},
+	{0x5811, 0x09, 0, 0},
+	{0x5812, 0x07, 0, 0},
+	{0x5813, 0x03, 0, 0},
+	{0x5814, 0x00, 0, 0},
+	{0x5815, 0x01, 0, 0},
+	{0x5816, 0x03, 0, 0},
+	{0x5817, 0x08, 0, 0},
+	{0x5818, 0x0d, 0, 0},
+	{0x5819, 0x08, 0, 0},
+	{0x581a, 0x05, 0, 0},
+	{0x581b, 0x06, 0, 0},
+	{0x581c, 0x08, 0, 0},
+	{0x581d, 0x0e, 0, 0},
+	{0x581e, 0x29, 0, 0},
+	{0x581f, 0x17, 0, 0},
+	{0x5820, 0x11, 0, 0},
+	{0x5821, 0x11, 0, 0},
+	{0x5822, 0x15, 0, 0},
+	{0x5823, 0x28, 0, 0},
+	{0x5824, 0x46, 0, 0},
+	{0x5825, 0x26, 0, 0},
+	{0x5826, 0x08, 0, 0},
+	{0x5827, 0x26, 0, 0},
+	{0x5828, 0x64, 0, 0},
+	{0x5829, 0x26, 0, 0},
+	{0x582a, 0x24, 0, 0},
+	{0x582b, 0x22, 0, 0},
+	{0x582c, 0x24, 0, 0},
+	{0x582d, 0x24, 0, 0},
+	{0x582e, 0x06, 0, 0},
+	{0x582f, 0x22, 0, 0},
+	{0x5830, 0x40, 0, 0},
+	{0x5831, 0x42, 0, 0},
+	{0x5832, 0x24, 0, 0},
+	{0x5833, 0x26, 0, 0},
+	{0x5834, 0x24, 0, 0},
+	{0x5835, 0x22, 0, 0},
+	{0x5836, 0x22, 0, 0},
+	{0x5837, 0x26, 0, 0},
+	{0x5838, 0x44, 0, 0},
+	{0x5839, 0x24, 0, 0},
+	{0x583a, 0x26, 0, 0},
+	{0x583b, 0x28, 0, 0},
+	{0x583c, 0x42, 0, 0},
+	{0x583d, 0xce, 0, 0},
+	{0x5025, 0x00, 0, 0},
+	{0x3a0f, 0x30, 0, 0},
+	{0x3a10, 0x28, 0, 0},
+	{0x3a1b, 0x30, 0, 0},
+	{0x3a1e, 0x26, 0, 0},
+	{0x3a11, 0x60, 0, 0},
+	{0x3a1f, 0x14, 0, 3},
 };
 
 static const struct regval_list ov5640_start_stream[] = {
@@ -809,8 +1073,8 @@ static int ov5640_write_init_regs(struct ov5640_gmsl *sensor)
 	}
 
 	ret = ov5640_write_array(sensor,
-				 ov5640_init_setting,
-				 ARRAY_SIZE(ov5640_init_setting));
+				 ov5640_720p_init_setting,
+				 ARRAY_SIZE(ov5640_720p_init_setting));
 	if (!ret)
 		dev_dbg(&sensor->client->dev, "ov5640-gmsl: sensor init registers written\n");
 
@@ -935,6 +1199,112 @@ static long ov5640_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	return ret;
 }
 
+static int ov5640_gmsl_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct ov5640_gmsl *sensor = to_ov5640_gmsl(sd);
+	int ret = 0;
+
+	mutex_lock(&sensor->lock);
+	if (enable)
+		ret = ov5640_stream_on(sensor);
+	else
+		ret = ov5640_stream_off(sensor);
+	mutex_unlock(&sensor->lock);
+
+	return ret;
+}
+
+static int ov5640_gmsl_enum_mbus_code(struct v4l2_subdev *sd,
+				      struct v4l2_subdev_state *state,
+				      struct v4l2_subdev_mbus_code_enum *code)
+{
+	if (code->index)
+		return -EINVAL;
+
+	code->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	return 0;
+}
+
+static int ov5640_gmsl_get_fmt(struct v4l2_subdev *sd,
+			       struct v4l2_subdev_state *state,
+			       struct v4l2_subdev_format *fmt)
+{
+	struct ov5640_gmsl *sensor = to_ov5640_gmsl(sd);
+
+	fmt->format = sensor->fmt;
+	return 0;
+}
+
+static int ov5640_gmsl_set_fmt(struct v4l2_subdev *sd,
+			       struct v4l2_subdev_state *state,
+			       struct v4l2_subdev_format *fmt)
+{
+	struct ov5640_gmsl *sensor = to_ov5640_gmsl(sd);
+
+	fmt->format.code = MEDIA_BUS_FMT_UYVY8_1X16;
+	fmt->format.width = OV5640_GMSL_WIDTH;
+	fmt->format.height = OV5640_GMSL_HEIGHT;
+	fmt->format.field = V4L2_FIELD_NONE;
+	fmt->format.colorspace = V4L2_COLORSPACE_SRGB;
+	sensor->fmt = fmt->format;
+	return 0;
+}
+
+static int ov5640_gmsl_enum_frame_size(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_state *state,
+				       struct v4l2_subdev_frame_size_enum *fse)
+{
+	if (fse->index || fse->code != MEDIA_BUS_FMT_UYVY8_1X16)
+		return -EINVAL;
+
+	fse->min_width = OV5640_GMSL_WIDTH;
+	fse->max_width = OV5640_GMSL_WIDTH;
+	fse->min_height = OV5640_GMSL_HEIGHT;
+	fse->max_height = OV5640_GMSL_HEIGHT;
+	return 0;
+}
+
+static const struct v4l2_subdev_video_ops ov5640_gmsl_video_ops = {
+	.s_stream = ov5640_gmsl_s_stream,
+};
+
+static const struct v4l2_subdev_pad_ops ov5640_gmsl_pad_ops = {
+	.enum_mbus_code = ov5640_gmsl_enum_mbus_code,
+	.get_fmt = ov5640_gmsl_get_fmt,
+	.set_fmt = ov5640_gmsl_set_fmt,
+	.enum_frame_size = ov5640_gmsl_enum_frame_size,
+};
+
+static const struct v4l2_subdev_ops ov5640_gmsl_subdev_ops = {
+	.video = &ov5640_gmsl_video_ops,
+	.pad = &ov5640_gmsl_pad_ops,
+};
+
+static int ov5640_gmsl_init_controls(struct ov5640_gmsl *sensor)
+{
+	struct v4l2_ctrl_handler *hdl = &sensor->ctrl_handler;
+
+	v4l2_ctrl_handler_init(hdl, 2);
+	v4l2_ctrl_new_std(hdl, NULL, V4L2_CID_PIXEL_RATE,
+			  OV5640_GMSL_PIXEL_RATE, OV5640_GMSL_PIXEL_RATE,
+			  1, OV5640_GMSL_PIXEL_RATE);
+	sensor->link_freq = v4l2_ctrl_new_int_menu(hdl, NULL,
+						   V4L2_CID_LINK_FREQ, 0, 0,
+						   ov5640_gmsl_link_freq_menu);
+	if (sensor->link_freq)
+		sensor->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	if (hdl->error) {
+		int ret = hdl->error;
+
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	sensor->sd.ctrl_handler = hdl;
+	return 0;
+}
+
 static int ov5640_dev_open(struct inode *inode, struct file *file)
 {
 	struct miscdevice *misc = file->private_data;
@@ -962,6 +1332,7 @@ static int ov5640_probe(struct i2c_client *client)
 {
 	struct ov5640_gmsl *sensor;
 	struct device *dev = &client->dev;
+	struct fwnode_handle *ep;
 	int ret;
 	u32 val;
 
@@ -976,6 +1347,11 @@ static int ov5640_probe(struct i2c_client *client)
 	sensor->ser_base_addr = MAX9295_BASE_ADDR;
 	mutex_init(&sensor->lock);
 	i2c_set_clientdata(client, sensor);
+	sensor->fmt.code = MEDIA_BUS_FMT_UYVY8_1X16;
+	sensor->fmt.width = OV5640_GMSL_WIDTH;
+	sensor->fmt.height = OV5640_GMSL_HEIGHT;
+	sensor->fmt.field = V4L2_FIELD_NONE;
+	sensor->fmt.colorspace = V4L2_COLORSPACE_SRGB;
 
 	sensor->pwdn = devm_gpiod_get_optional(dev, "pwdn",
 				       GPIOD_OUT_HIGH | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
@@ -1031,8 +1407,33 @@ static int ov5640_probe(struct i2c_client *client)
 		goto err_mutex;
 
         ret = ov5640_write_init_regs(sensor);
-        if (ret) 
+        if (ret)
                 goto err_power;
+
+	v4l2_i2c_subdev_init(&sensor->sd, client, &ov5640_gmsl_subdev_ops);
+	sensor->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sensor->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	sensor->pad.flags = MEDIA_PAD_FL_SOURCE;
+
+	ret = media_entity_pads_init(&sensor->sd.entity, 1, &sensor->pad);
+	if (ret)
+		goto err_power;
+
+	ep = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
+	if (ep) {
+		ret = v4l2_async_subdev_endpoint_add(&sensor->sd, ep);
+		fwnode_handle_put(ep);
+		if (ret)
+			goto err_media_entity;
+	}
+
+	ret = ov5640_gmsl_init_controls(sensor);
+	if (ret)
+		goto err_subdev_cleanup;
+
+	ret = v4l2_async_register_subdev(&sensor->sd);
+	if (ret)
+		goto err_ctrls;
 
 	sensor->miscdev.minor = MISC_DYNAMIC_MINOR;
 	sensor->miscdev.fops = &ov5640_fops;
@@ -1046,18 +1447,26 @@ static int ov5640_probe(struct i2c_client *client)
 					     "ov5640-gmsl-%02x", client->addr);
 	if (!sensor->miscdev.name) {
 		ret = -ENOMEM;
-		goto err_mutex;
+		goto err_subdev;
 	}
 
 	ret = misc_register(&sensor->miscdev);
 	if (ret)
-		goto err_mutex;
+		goto err_subdev;
 
 	global_ov5640_gmsl = sensor;
 	dev_info(dev, "ov5640-gmsl: probe ok, /dev/%s\n", sensor->miscdev.name);
 
         return 0;
 
+err_subdev:
+	v4l2_async_unregister_subdev(&sensor->sd);
+err_ctrls:
+	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
+err_subdev_cleanup:
+	v4l2_subdev_cleanup(&sensor->sd);
+err_media_entity:
+	media_entity_cleanup(&sensor->sd.entity);
 err_power:
 	ov5640_power_off(sensor);
 err_mutex:
@@ -1076,6 +1485,10 @@ static void ov5640_remove(struct i2c_client *client)
 		global_ov5640_gmsl = NULL;
 
 	misc_deregister(&sensor->miscdev);
+	v4l2_async_unregister_subdev(&sensor->sd);
+	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
+	v4l2_subdev_cleanup(&sensor->sd);
+	media_entity_cleanup(&sensor->sd.entity);
 	ov5640_stream_off(sensor);
 	ov5640_power_off(sensor);
 	mutex_destroy(&sensor->lock);

@@ -17,7 +17,14 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
+#include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <media/media-entity.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-fwnode.h>
+#include <media/v4l2-subdev.h>
 
 /*
  * Sensor Configuration: 1920x1080 @ 30fps, 1-lane MIPI
@@ -40,6 +47,23 @@
 #define OV2735_IOCTL_STREAM_OFF		_IO(OV2735_IOC_MAGIC, 5)
 #define OV2735_IOCTL_DETECT		_IO(OV2735_IOC_MAGIC, 6)
 
+#define OV2735_LINK_FREQ		105000000ULL
+#define OV2735_PIXEL_RATE		42000000
+#define OV2735_WIDTH			1920
+#define OV2735_HEIGHT			1080
+#define OV2735_HTS			1053
+#define OV2735_VTS			1329
+#define OV2735_EXPOSURE_MIN		1
+#define OV2735_EXPOSURE_MAX		1328
+#define OV2735_EXPOSURE_DEF		400
+#define OV2735_GAIN_MIN			0
+#define OV2735_GAIN_MAX			255
+#define OV2735_GAIN_DEF			0x40
+
+static const s64 ov2735_link_freq_menu[] = {
+	OV2735_LINK_FREQ,
+};
+
 static struct ov2735 *global_ov2735;
 
 struct ov2735 {
@@ -50,7 +74,25 @@ struct ov2735 {
 	struct mutex lock;
 	struct regulator *vdd;
 	struct miscdevice miscdev;
+	struct v4l2_subdev sd;
+	struct media_pad pad;
+	struct v4l2_ctrl_handler ctrl_handler;
+	struct v4l2_ctrl *link_freq;
+	struct v4l2_mbus_framefmt fmt;
+	bool powered;
+	bool mclk_enabled;
+	bool streaming;
 };
+
+static inline struct ov2735 *to_ov2735(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct ov2735, sd);
+}
+
+static int ov2735_write_init_regs(struct ov2735 *sensor);
+static int ov2735_power_on(struct ov2735 *sensor);
+static void ov2735_power_off(struct ov2735 *sensor);
+static int ov2735_detect(struct ov2735 *sensor);
 
 struct regval_list {
 	u8 addr;
@@ -272,10 +314,210 @@ static int ov2735_stream_off(struct ov2735 *sensor)
 	return ov2735_write(sensor, 0xa0, 0x00); /* MIPI disable, stream off */
 }
 
-static int ov2735_write_init_regs(struct ov2735 *sensor);
-static int ov2735_power_on(struct ov2735 *sensor);
-static void ov2735_power_off(struct ov2735 *sensor);
-static int ov2735_detect(struct ov2735 *sensor);
+static int ov2735_set_exposure(struct ov2735 *sensor, u32 exposure)
+{
+	int ret;
+
+	ret = ov2735_write(sensor, 0xfd, 0x01);
+	if (ret < 0)
+		return ret;
+	ret = ov2735_write(sensor, 0x03, (exposure >> 8) & 0xff);
+	if (ret < 0)
+		return ret;
+	return ov2735_write(sensor, 0x04, exposure & 0xff);
+}
+
+static int ov2735_set_analogue_gain(struct ov2735 *sensor, u32 gain)
+{
+	int ret;
+
+	ret = ov2735_write(sensor, 0xfd, 0x01);
+	if (ret < 0)
+		return ret;
+	return ov2735_write(sensor, 0x24, gain & 0xff);
+}
+
+static int ov2735_set_vblank(struct ov2735 *sensor, u32 vblank)
+{
+	u32 vts = OV2735_HEIGHT + vblank;
+	int ret;
+
+	ret = ov2735_write(sensor, 0xfd, 0x01);
+	if (ret < 0)
+		return ret;
+	ret = ov2735_write(sensor, 0x4e, (vts >> 8) & 0xff);
+	if (ret < 0)
+		return ret;
+	return ov2735_write(sensor, 0x4f, vts & 0xff);
+}
+
+static int ov2735_set_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct ov2735 *sensor =
+		container_of(ctrl->handler, struct ov2735, ctrl_handler);
+
+	if (!sensor->powered)
+		return 0;
+
+	switch (ctrl->id) {
+	case V4L2_CID_EXPOSURE:
+		return ov2735_set_exposure(sensor, ctrl->val);
+	case V4L2_CID_ANALOGUE_GAIN:
+		return ov2735_set_analogue_gain(sensor, ctrl->val);
+	case V4L2_CID_VBLANK:
+		return ov2735_set_vblank(sensor, ctrl->val);
+	default:
+		return 0;
+	}
+}
+
+static const struct v4l2_ctrl_ops ov2735_ctrl_ops = {
+	.s_ctrl = ov2735_set_ctrl,
+};
+
+static int ov2735_init_controls(struct ov2735 *sensor)
+{
+	struct v4l2_ctrl_handler *hdl = &sensor->ctrl_handler;
+	u32 hblank = OV2735_HTS > OV2735_WIDTH ? OV2735_HTS - OV2735_WIDTH : 0;
+	u32 vblank = OV2735_VTS - OV2735_HEIGHT;
+	int ret;
+
+	v4l2_ctrl_handler_init(hdl, 6);
+	v4l2_ctrl_new_std(hdl, &ov2735_ctrl_ops, V4L2_CID_PIXEL_RATE,
+			  OV2735_PIXEL_RATE, OV2735_PIXEL_RATE, 1,
+			  OV2735_PIXEL_RATE);
+	sensor->link_freq = v4l2_ctrl_new_int_menu(hdl, &ov2735_ctrl_ops,
+						   V4L2_CID_LINK_FREQ, 0, 0,
+						   ov2735_link_freq_menu);
+	if (sensor->link_freq)
+		sensor->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	v4l2_ctrl_new_std(hdl, &ov2735_ctrl_ops, V4L2_CID_HBLANK,
+			  hblank, hblank, 1, hblank);
+	v4l2_ctrl_new_std(hdl, &ov2735_ctrl_ops, V4L2_CID_VBLANK,
+			  vblank, 0xffff - OV2735_HEIGHT, 1, vblank);
+	v4l2_ctrl_new_std(hdl, &ov2735_ctrl_ops, V4L2_CID_EXPOSURE,
+			  OV2735_EXPOSURE_MIN, OV2735_EXPOSURE_MAX, 1,
+			  OV2735_EXPOSURE_DEF);
+	v4l2_ctrl_new_std(hdl, &ov2735_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+			  OV2735_GAIN_MIN, OV2735_GAIN_MAX, 1,
+			  OV2735_GAIN_DEF);
+
+	if (hdl->error) {
+		ret = hdl->error;
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	sensor->sd.ctrl_handler = hdl;
+	return 0;
+}
+
+static int ov2735_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct ov2735 *sensor = to_ov2735(sd);
+	int ret = 0;
+
+	if (enable) {
+		if (!sensor->powered) {
+			ret = ov2735_power_on(sensor);
+			if (ret)
+				return ret;
+			sensor->powered = true;
+			ret = ov2735_write_init_regs(sensor);
+			if (ret)
+				goto err_power;
+			ret = v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
+			if (ret)
+				goto err_power;
+		}
+		ret = ov2735_stream_on(sensor);
+		if (!ret)
+			sensor->streaming = true;
+	} else {
+		if (sensor->streaming)
+			ret = ov2735_stream_off(sensor);
+		sensor->streaming = false;
+		if (sensor->powered) {
+			ov2735_power_off(sensor);
+			sensor->powered = false;
+		}
+	}
+	return ret;
+
+err_power:
+	ov2735_power_off(sensor);
+	sensor->powered = false;
+	return ret;
+}
+
+static int ov2735_enum_mbus_code(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *state,
+				 struct v4l2_subdev_mbus_code_enum *code)
+{
+	if (code->index)
+		return -EINVAL;
+
+	code->code = MEDIA_BUS_FMT_SGRBG10_1X10;
+	return 0;
+}
+
+static int ov2735_get_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_subdev_state *state,
+			  struct v4l2_subdev_format *fmt)
+{
+	struct ov2735 *sensor = to_ov2735(sd);
+
+	fmt->format = sensor->fmt;
+	return 0;
+}
+
+static int ov2735_set_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_subdev_state *state,
+			  struct v4l2_subdev_format *fmt)
+{
+	struct ov2735 *sensor = to_ov2735(sd);
+
+	fmt->format.code = MEDIA_BUS_FMT_SGRBG10_1X10;
+	fmt->format.width = OV2735_WIDTH;
+	fmt->format.height = OV2735_HEIGHT;
+	fmt->format.field = V4L2_FIELD_NONE;
+	fmt->format.colorspace = V4L2_COLORSPACE_RAW;
+
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		sensor->fmt = fmt->format;
+
+	return 0;
+}
+
+static int ov2735_enum_frame_size(struct v4l2_subdev *sd,
+				  struct v4l2_subdev_state *state,
+				  struct v4l2_subdev_frame_size_enum *fse)
+{
+	if (fse->index || fse->code != MEDIA_BUS_FMT_SGRBG10_1X10)
+		return -EINVAL;
+
+	fse->min_width = OV2735_WIDTH;
+	fse->max_width = OV2735_WIDTH;
+	fse->min_height = OV2735_HEIGHT;
+	fse->max_height = OV2735_HEIGHT;
+	return 0;
+}
+
+static const struct v4l2_subdev_video_ops ov2735_video_ops = {
+	.s_stream = ov2735_s_stream,
+};
+
+static const struct v4l2_subdev_pad_ops ov2735_pad_ops = {
+	.enum_mbus_code = ov2735_enum_mbus_code,
+	.get_fmt = ov2735_get_fmt,
+	.set_fmt = ov2735_set_fmt,
+	.enum_frame_size = ov2735_enum_frame_size,
+};
+
+static const struct v4l2_subdev_ops ov2735_subdev_ops = {
+	.video = &ov2735_video_ops,
+	.pad = &ov2735_pad_ops,
+};
 
 static long ov2735_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -393,6 +635,9 @@ static int ov2735_power_on(struct ov2735 *sensor)
 {
 	int ret;
 
+	if (sensor->powered)
+		return 0;
+
 	/* Set I2C mux to select this sensor */
 	if (sensor->i2c_mux) {
 		dev_info(&sensor->client->dev, "ov2735-test: set i2c-mux high\n");
@@ -417,11 +662,14 @@ static int ov2735_power_on(struct ov2735 *sensor)
 	}
 
 	/* Enable cam_mclk clock */
-	ret = clk_prepare_enable(sensor->mclk);
-	if (ret < 0) {
-		dev_err(&sensor->client->dev,
-			"ov2735-test: Failed to enable cam_mclk: %d\n", ret);
-		return ret;
+	if (!sensor->mclk_enabled) {
+		ret = clk_prepare_enable(sensor->mclk);
+		if (ret < 0) {
+			dev_err(&sensor->client->dev,
+				"ov2735-test: Failed to enable cam_mclk: %d\n", ret);
+			return ret;
+		}
+		sensor->mclk_enabled = true;
 	}
 	dev_info(&sensor->client->dev,
 		 "ov2735-test: cam_mclk enabled, rate=%lu Hz\n",
@@ -471,12 +719,16 @@ static int ov2735_power_on(struct ov2735 *sensor)
 	usleep_range(30000, 31000);
 
 	dev_info(&sensor->client->dev, "ov2735-test: power_on done\n");
+	sensor->powered = true;
 
 	return 0;
 }
 
 static void ov2735_power_off(struct ov2735 *sensor)
 {
+	if (!sensor->powered && !sensor->mclk_enabled)
+		return;
+
 	dev_info(&sensor->client->dev, "ov2735-test: power_off enter\n");
 
 	if (sensor->pwdn) {
@@ -494,6 +746,12 @@ static void ov2735_power_off(struct ov2735 *sensor)
 		gpiod_set_value_cansleep(sensor->i2c_mux, 0);
 	}
 
+	if (!IS_ERR_OR_NULL(sensor->mclk) && sensor->mclk_enabled) {
+		clk_disable_unprepare(sensor->mclk);
+		sensor->mclk_enabled = false;
+	}
+
+	sensor->powered = false;
 	dev_info(&sensor->client->dev, "ov2735-test: power_off done\n");
 }
 
@@ -513,6 +771,11 @@ static int ov2735_probe(struct i2c_client *client)
 	sensor->client = client;
 	mutex_init(&sensor->lock);
 	i2c_set_clientdata(client, sensor);
+	sensor->fmt.code = MEDIA_BUS_FMT_SGRBG10_1X10;
+	sensor->fmt.width = OV2735_WIDTH;
+	sensor->fmt.height = OV2735_HEIGHT;
+	sensor->fmt.field = V4L2_FIELD_NONE;
+	sensor->fmt.colorspace = V4L2_COLORSPACE_RAW;
 
 	dev_info(dev, "ov2735-test: get PWDN gpio\n");
 	sensor->pwdn = devm_gpiod_get_optional(
@@ -543,6 +806,31 @@ static int ov2735_probe(struct i2c_client *client)
 	}
 
 	ov2735_power_off(sensor);
+
+	v4l2_i2c_subdev_init(&sensor->sd, client, &ov2735_subdev_ops);
+	sensor->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sensor->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	sensor->pad.flags = MEDIA_PAD_FL_SOURCE;
+	ret = media_entity_pads_init(&sensor->sd.entity, 1, &sensor->pad);
+	if (ret) {
+		dev_err(dev, "ov2735-test: failed to init media pads: %d\n",
+			ret);
+		goto err_media_entity;
+	}
+
+	ret = ov2735_init_controls(sensor);
+	if (ret) {
+		dev_err(dev, "ov2735-test: failed to init controls: %d\n",
+			ret);
+		goto err_ctrls;
+	}
+
+	ret = v4l2_async_register_subdev(&sensor->sd);
+	if (ret) {
+		dev_err(dev, "ov2735-test: failed to register subdev: %d\n",
+			ret);
+		goto err_subdev;
+	}
 
 	sensor->miscdev.minor = MISC_DYNAMIC_MINOR;
 	sensor->miscdev.fops = &ov2735_fops;
@@ -579,6 +867,12 @@ static int ov2735_probe(struct i2c_client *client)
 	return 0;
 
 err_misc_register:
+	v4l2_async_unregister_subdev(&sensor->sd);
+err_subdev:
+	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
+err_ctrls:
+	media_entity_cleanup(&sensor->sd.entity);
+err_media_entity:
 	ov2735_power_off(sensor);
 	mutex_destroy(&sensor->lock);
 	return ret;
@@ -600,6 +894,9 @@ static void ov2735_remove(struct i2c_client *client)
 		global_ov2735 = NULL;
 
 	misc_deregister(&sensor->miscdev);
+	v4l2_async_unregister_subdev(&sensor->sd);
+	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
+	media_entity_cleanup(&sensor->sd.entity);
 	ov2735_power_off(sensor);
 	mutex_destroy(&sensor->lock);
 }
