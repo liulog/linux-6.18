@@ -110,11 +110,39 @@
 	};
 };
 
-/* ifx: imx219 uses csi-id = <1> */
+/* ifx: cam1 uses csi-1 */
 &i2c5 {
 	imx219@10 {
 		csi-id = <1>;
 	};
+
+	ov5640@3c {
+		csi-id = <1>;
+	};
+};
+
+&imx219_out {
+	remote-endpoint = <&ccic1_in>;
+};
+
+&ov5640_gmsl_out {
+	remote-endpoint = <&ccic1_in_alt>;
+};
+
+&ov5647_out {
+	remote-endpoint = <&ccic2_in>;
+};
+
+&ccic1_in {
+	remote-endpoint = <&imx219_out>;
+};
+
+&ccic1_in_alt {
+	remote-endpoint = <&ov5640_gmsl_out>;
+};
+
+&ccic2_in {
+	remote-endpoint = <&ov5647_out>;
 };
 
 &flexcan2 {
@@ -125,7 +153,7 @@
 };
 
 &ccic0 {
-	status = "okay";
+	status = "disabled";
 };
 
 &ccic1 {
@@ -141,7 +169,7 @@
 };
 
 &csiphy0 {
-	status = "okay";
+	status = "disabled";
 };
 
 &csiphy1 {

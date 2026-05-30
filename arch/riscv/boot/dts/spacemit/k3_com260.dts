@@ -141,12 +141,36 @@
 	status = "okay";
 };
 
+&imx219_out {
+	remote-endpoint = <&ccic0_in>;
+};
+
+&ov5647_out {
+	remote-endpoint = <&ccic2_in>;
+};
+
+&ov5640_gmsl_out {
+	remote-endpoint = <&ccic0_in_alt>;
+};
+
+&ccic0_in {
+	remote-endpoint = <&imx219_out>;
+};
+
+&ccic2_in {
+	remote-endpoint = <&ov5647_out>;
+};
+
+&ccic0_in_alt {
+	remote-endpoint = <&ov5640_gmsl_out>;
+};
+
 &ccic0 {
 	status = "okay";
 };
 
 &ccic1 {
-	status = "okay";
+	status = "disabled";
 };
 
 &ccic2 {
@@ -162,7 +186,7 @@
 };
 
 &csiphy1 {
-	status = "okay";
+	status = "disabled";
 };
 
 &csiphy2 {

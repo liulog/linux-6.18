@@ -997,6 +997,13 @@
 		vdd-supply = <&aldo3>;
 		pwdn-gpios = <&gpio 1 13 GPIO_ACTIVE_HIGH>;
 		status = "okay";
+
+		port {
+			imx219_out: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <456000000>;
+			};
+		};
 	};
 
 	ov5647@36 {
@@ -1009,6 +1016,13 @@
 		i2c-mux-gpios = <&gpio 3 7 GPIO_ACTIVE_HIGH>;
 		pwdn-gpios = <&gpio 1 12 GPIO_ACTIVE_HIGH>;
 		status = "okay";
+
+		port {
+			ov5647_out: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <204167000>;
+			};
+		};
 	};
 
 	ov5640@3c {
@@ -1024,6 +1038,14 @@
 		deserializer-addr = <0x27>;
 		serializer-base-addr = <0x41>;
 		status = "okay";
+
+		port {
+			ov5640_gmsl_out: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <600000000>;
+				spacemit,vc = <0 1 2 3>;
+			};
+		};
 	};
 
 	imx415@37 {
