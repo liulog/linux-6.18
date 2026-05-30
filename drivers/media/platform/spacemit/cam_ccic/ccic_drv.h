@@ -14,7 +14,10 @@
 #include <linux/of_device.h>
 #include <linux/interrupt.h>
 #include <linux/miscdevice.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-subdev.h>
 #include <media/videobuf2-v4l2.h>
 #include <linux/reset.h>
 //#include "cam_dbg.h"
@@ -176,6 +179,14 @@ struct ccic_dev {
 	/* object for csiphy part */
 	struct csiphy_device *csiphy;
 	struct v4l2_device v4l2_dev;
+	struct v4l2_async_notifier notifier;
+	struct v4l2_subdev *sensor_sd;
+	struct mutex sensor_stream_lock;
+	unsigned int sensor_stream_count;
+	struct v4l2_ctrl_handler ctrl_handler;
+	bool notifier_registered;
+	unsigned int default_lane_num;
+	unsigned int default_mipi_m_bps;
 	void *vnode;
 	void *path_vnode[PATH_NUM_PER_DEV];
 

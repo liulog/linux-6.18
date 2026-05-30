@@ -21,7 +21,10 @@
 #include <linux/delay.h>
 #include <linux/atomic.h>
 #include <linux/clk.h>
+#include <linux/dma-mapping.h>
+#include <linux/fwnode.h>
 #include "ccic_drv.h"
+#include <media/v4l2-fwnode.h>
 #include "ccic_hwreg.h"
 #include "csiphy.h"
 #include "ccic_vdev.h"
@@ -31,7 +34,6 @@
 
 #ifdef CONFIG_SPACEMIT_K3_CCIC_IOMMU
 #include "ccic_iommu.h"
-#include <linux/dma-mapping.h>
 #define MMU_RESERVED_MEM_SIZE (4096)
 #define MMU_REG_BASE (0xd420fc00)
 #endif
@@ -137,14 +139,14 @@ static int ccic_clk_set_rate(struct ccic_ctrl *ctrl_dev, int mode)
 	unsigned long clk_val;
 	struct ccic_dev *ccic_dev = ctrl_dev->ccic_dev;
 
-	//clk_val = clk_round_rate(ccic_dev->csi_clk, 1000000000);
-	clk_val = clk_round_rate(ccic_dev->csi_clk, 500000000);
+	clk_val = clk_round_rate(ccic_dev->csi_clk, 1000000000);
+	// clk_val = clk_round_rate(ccic_dev->csi_clk, 500000000);
 	clk_set_rate(ccic_dev->csi_clk, clk_val);
 	clk_val = clk_get_rate(ccic_dev->csi_clk);
 	pr_info("cam clk[csi_func]: %ld\n", clk_val);
 
-	//clk_val = clk_round_rate(ccic_dev->clk4x, 1000000000);
-	clk_val = clk_round_rate(ccic_dev->clk4x, 500000000);
+	clk_val = clk_round_rate(ccic_dev->clk4x, 1000000000);
+	// clk_val = clk_round_rate(ccic_dev->clk4x, 500000000);
 	clk_set_rate(ccic_dev->clk4x, clk_val);
 	clk_val = clk_get_rate(ccic_dev->clk4x);
 	pr_info("cam clk[ccic_func]: %ld\n", clk_val);
@@ -294,6 +296,146 @@ static struct ccic_ctrl_ops ccic_ctrl_ops = {
 	.config_csi_path_dt_filter = ccic_config_csi_path_dt_filter,
 	.config_csi_path_vc = ccic_config_csi_path_vc,
 };
+
+static int ccic_async_bound(struct v4l2_async_notifier *notifier,
+			    struct v4l2_subdev *subdev,
+			    struct v4l2_async_connection *asc)
+{
+	struct ccic_dev *ccic_dev =
+		container_of(notifier, struct ccic_dev, notifier);
+	int ret;
+
+	ccic_dev->sensor_sd = subdev;
+	dev_info(ccic_dev->dev, "bound sensor subdev %s\n", subdev->name);
+
+	ret = v4l2_ctrl_add_handler(&ccic_dev->ctrl_handler,
+				    subdev->ctrl_handler, NULL, true);
+	if (ret)
+		dev_warn(ccic_dev->dev,
+			 "failed to add sensor controls to video node: %d\n",
+			 ret);
+
+	return 0;
+}
+
+static void ccic_async_unbind(struct v4l2_async_notifier *notifier,
+			      struct v4l2_subdev *subdev,
+			      struct v4l2_async_connection *asc)
+{
+	struct ccic_dev *ccic_dev =
+		container_of(notifier, struct ccic_dev, notifier);
+
+	if (ccic_dev->sensor_sd == subdev)
+		ccic_dev->sensor_sd = NULL;
+}
+
+static const struct v4l2_async_notifier_operations ccic_async_ops = {
+	.bound = ccic_async_bound,
+	.unbind = ccic_async_unbind,
+};
+
+static int ccic_async_register(struct ccic_dev *ccic_dev)
+{
+	struct fwnode_handle *ep;
+	struct fwnode_handle *remote_ep;
+	struct fwnode_handle *remote_dev;
+	struct v4l2_async_connection *asc;
+	struct v4l2_fwnode_endpoint vep = { 0 };
+	bool has_remote = false;
+	int ret;
+
+	v4l2_async_nf_init(&ccic_dev->notifier, &ccic_dev->v4l2_dev);
+	ccic_dev->notifier.ops = &ccic_async_ops;
+
+	fwnode_graph_for_each_endpoint(dev_fwnode(ccic_dev->dev), ep) {
+		memset(&vep, 0, sizeof(vep));
+		ret = v4l2_fwnode_endpoint_parse(ep, &vep);
+		if (ret) {
+			dev_warn(ccic_dev->dev,
+				 "failed to parse endpoint: %d\n", ret);
+		} else {
+			dev_info(ccic_dev->dev,
+				 "found endpoint lanes %u link_freqs %u\n",
+				 vep.bus.mipi_csi2.num_data_lanes,
+				 vep.nr_of_link_frequencies);
+		}
+		v4l2_fwnode_endpoint_free(&vep);
+
+		remote_ep = fwnode_graph_get_remote_endpoint(ep);
+		if (!remote_ep)
+			continue;
+
+		remote_dev = fwnode_graph_get_port_parent(remote_ep);
+		if (remote_dev && !fwnode_device_is_available(remote_dev)) {
+			dev_info(ccic_dev->dev,
+				 "skip disabled remote endpoint\n");
+			fwnode_handle_put(remote_dev);
+			fwnode_handle_put(remote_ep);
+			continue;
+		}
+		if (remote_dev)
+			fwnode_handle_put(remote_dev);
+
+		memset(&vep, 0, sizeof(vep));
+		ret = v4l2_fwnode_endpoint_parse(ep, &vep);
+		if (!ret) {
+			if (vep.bus.mipi_csi2.num_data_lanes)
+				ccic_dev->default_lane_num =
+					vep.bus.mipi_csi2.num_data_lanes;
+			if (vep.nr_of_link_frequencies && vep.link_frequencies[0])
+				ccic_dev->default_mipi_m_bps =
+					DIV_ROUND_UP_ULL(vep.link_frequencies[0] * 2,
+							 MHZ);
+			dev_info(ccic_dev->dev,
+				 "active endpoint csi lanes %u mipi_mbps %u\n",
+				 ccic_dev->default_lane_num,
+				 ccic_dev->default_mipi_m_bps);
+		}
+		v4l2_fwnode_endpoint_free(&vep);
+
+		memset(&vep, 0, sizeof(vep));
+		ret = v4l2_fwnode_endpoint_parse(remote_ep, &vep);
+		if (!ret) {
+			if (vep.bus.mipi_csi2.num_data_lanes)
+				ccic_dev->default_lane_num =
+					vep.bus.mipi_csi2.num_data_lanes;
+			if (vep.nr_of_link_frequencies && vep.link_frequencies[0])
+				ccic_dev->default_mipi_m_bps =
+					DIV_ROUND_UP_ULL(vep.link_frequencies[0] * 2,
+							 MHZ);
+			dev_info(ccic_dev->dev,
+				 "remote default csi lanes %u mipi_mbps %u\n",
+				 ccic_dev->default_lane_num,
+				 ccic_dev->default_mipi_m_bps);
+		}
+		v4l2_fwnode_endpoint_free(&vep);
+
+		asc = v4l2_async_nf_add_fwnode_remote(&ccic_dev->notifier, ep,
+						      struct v4l2_async_connection);
+		fwnode_handle_put(remote_ep);
+		if (IS_ERR(asc)) {
+			ret = PTR_ERR(asc);
+			v4l2_async_nf_cleanup(&ccic_dev->notifier);
+			return ret;
+		}
+
+		has_remote = true;
+	}
+
+	if (!has_remote) {
+		v4l2_async_nf_cleanup(&ccic_dev->notifier);
+		return 0;
+	}
+
+	ret = v4l2_async_nf_register(&ccic_dev->notifier);
+	if (ret) {
+		v4l2_async_nf_cleanup(&ccic_dev->notifier);
+		return ret;
+	}
+
+	ccic_dev->notifier_registered = true;
+	return 0;
+}
 
 static int ccic_init_clk(struct ccic_dev *dev)
 {
@@ -498,6 +640,7 @@ static void ccic_dma_bh_handler(struct ccic_dma_work_struct *ccic_dma_work)
 	}
 	spin_unlock_irqrestore(&vnode->slock, flags);
 	list_for_each_entry_safe(pos, n, &export_list, list_entry) {
+		list_del_init(&(pos->list_entry));
 		if (!(pos->flags & BUF_FLAG_SOF_TOUCH)) {
 			dev_warn(
 				dev,
@@ -876,16 +1019,39 @@ static int ccic_probe(struct platform_device *pdev)
 	ccic_dev->dev = &pdev->dev;
 	ccic_dev->ctrl = ccic_ctrl;
 	ccic_dev->interrupt_mask_value = CSI2PHYERRS | FRAMEIRQS;
+	mutex_init(&ccic_dev->sensor_stream_lock);
 	dev_set_drvdata(dev, ccic_dev);
 
 	ccic_init_clk(ccic_dev);
 
 	ccic_device_register(ccic_dev);
 
-	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(33));
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(33));
+	if (ret) {
+		dev_err(&pdev->dev, "failed to set DMA mask: %d\n", ret);
+		return ret;
+	}
+	if (!pdev->dev.bus_dma_limit)
+		pdev->dev.bus_dma_limit = DMA_BIT_MASK(33);
 	ret = v4l2_device_register(&pdev->dev, &ccic_dev->v4l2_dev);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to register v4l2 dev\n");
+		return ret;
+	}
+	ret = v4l2_ctrl_handler_init(&ccic_dev->ctrl_handler, 8);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to init ctrl handler\n");
+		v4l2_device_unregister(&ccic_dev->v4l2_dev);
+		return ret;
+	}
+	ccic_dev->v4l2_dev.ctrl_handler = &ccic_dev->ctrl_handler;
+
+	ret = ccic_async_register(ccic_dev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register async notifier: %d\n",
+			ret);
+		v4l2_ctrl_handler_free(&ccic_dev->ctrl_handler);
+		v4l2_device_unregister(&ccic_dev->v4l2_dev);
 		return ret;
 	}
 	snprintf(ccic_dev->name, 32, "csi%d", ccic_ctrl->index);
@@ -900,6 +1066,12 @@ static int ccic_probe(struct platform_device *pdev)
 		if (NULL == ccic_dev->path_vnode[i]) {
 			dev_err(&pdev->dev,
 				"failed to create ccic path vnode %d\n", i);
+			if (ccic_dev->notifier_registered) {
+				v4l2_async_nf_unregister(&ccic_dev->notifier);
+				v4l2_async_nf_cleanup(&ccic_dev->notifier);
+			}
+			v4l2_ctrl_handler_free(&ccic_dev->ctrl_handler);
+			v4l2_device_unregister(&ccic_dev->v4l2_dev);
 			return -EPROBE_DEFER;
 		}
 	}
@@ -967,6 +1139,11 @@ static void ccic_remove(struct platform_device *pdev)
 			(struct ccic_vnode *)ccic_dev->path_vnode[i]);
 	}
 
+	if (ccic_dev->notifier_registered) {
+		v4l2_async_nf_unregister(&ccic_dev->notifier);
+		v4l2_async_nf_cleanup(&ccic_dev->notifier);
+	}
+	v4l2_ctrl_handler_free(&ccic_dev->ctrl_handler);
 	v4l2_device_unregister(&ccic_dev->v4l2_dev);
 	ccic_device_unregister(ccic_dev);
 }
