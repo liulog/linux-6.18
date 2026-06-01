@@ -13,17 +13,19 @@
 			opp-hz = /bits/ 64 <2400000000>, /bits/ 64 <2400000000>;
 			opp-microvolt = <1000000 1000000 1004000>;
 			clock-latency-ns = <200000>;
+			turbo-mode;
 		};
 
 		opp2300000000 {
 			opp-hz = /bits/ 64 <2300000000>, /bits/ 64 <2300000000>;
-			opp-microvolt = <880000 880000 884000>;
 			clock-latency-ns = <200000>;
+			opp-microvolt = <1000000 1000000 1004000>;
+			turbo-mode;
 		};
 
 		opp2200000000 {
 			opp-hz = /bits/ 64 <2200000000>, /bits/ 64 <2200000000>;
-			opp-microvolt = <880000 880000 884000>;
+			opp-microvolt = <950000 950000 954000>;
 			clock-latency-ns = <200000>;
 		};
 
@@ -133,16 +135,19 @@
 		opp2000000000 {
 			opp-hz = /bits/ 64 <2000000000>, /bits/ 64 <2000000000>;
 			clock-latency-ns = <200000>;
+			turbo-mode;
 		};
 
 		opp1900000000 {
 			opp-hz = /bits/ 64 <1900000000>, /bits/ 64 <1900000000>;
 			clock-latency-ns = <200000>;
+			turbo-mode;
 		};
 
 		opp1850000000 {
 			opp-hz = /bits/ 64 <1850000000>, /bits/ 64 <1850000000>;
 			clock-latency-ns = <200000>;
+			turbo-mode;
 		};
 
 		opp1800000000 {

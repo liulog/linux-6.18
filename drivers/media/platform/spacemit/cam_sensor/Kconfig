@@ -8,6 +8,10 @@ comment "SPACEMIT K3 Camera Sensor"
 config SPACEMIT_K3_CAM_IMX219
 	tristate "Sony IMX219 sensor support for K3"
 	depends on SPACEMIT_K3_CCIC && I2C
+	select MEDIA_CONTROLLER
+	select V4L2_ASYNC
+	select V4L2_FWNODE
+	select VIDEO_V4L2_SUBDEV_API
 	help
 	  This is a i2c sensor driver for the Sony
 	  IMX219 camera.
@@ -18,6 +22,10 @@ config SPACEMIT_K3_CAM_IMX219
 config SPACEMIT_K3_CAM_IMX415
 	tristate "Sony IMX415 sensor support for K3"
 	depends on SPACEMIT_K3_CCIC && I2C
+	select MEDIA_CONTROLLER
+	select V4L2_ASYNC
+	select V4L2_FWNODE
+	select VIDEO_V4L2_SUBDEV_API
 	help
 	  This is a i2c sensor driver for the Sony
 	  IMX415 camera.
@@ -28,6 +36,10 @@ config SPACEMIT_K3_CAM_IMX415
 config SPACEMIT_K3_CAM_OV5647
 	tristate "OmniVision OV5647 sensor support"
 	depends on SPACEMIT_K3_CCIC && I2C
+	select MEDIA_CONTROLLER
+	select V4L2_ASYNC
+	select V4L2_FWNODE
+	select VIDEO_V4L2_SUBDEV_API
 	help
 	  This is a i2c sensor driver for the OmniVision
 	  OV5647 camera.
@@ -38,6 +50,10 @@ config SPACEMIT_K3_CAM_OV5647
 config SPACEMIT_K3_CAM_OV2735
 	tristate "OmniVision OV2735 sensor support"
 	depends on SPACEMIT_K3_CCIC && I2C
+	select MEDIA_CONTROLLER
+	select V4L2_ASYNC
+	select V4L2_FWNODE
+	select VIDEO_V4L2_SUBDEV_API
 	help
 	  This is a i2c sensor driver for the OmniVision
 	  OV2735 camera.

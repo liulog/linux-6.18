@@ -142,9 +142,9 @@
 			no-map;
 		};
 
-		/* vring2 */
-		rcpu0_vdev0vring2: vdev0vring2@c087c000 {
-			reg = <0x0 0xc087c000 0x0 0x1000>;
+		/* rcpu0 misc-used */
+		rcpu0_misc_used: rcpu0_misc-used@c087c000 {
+			reg = <0x0 0xc087c000 0x0 0x4000>;
 			no-map;
 		};
 
@@ -183,6 +183,17 @@
 		/* vring1 */
 		rcpu1_vdev0vring1: vdev0vring1@c086f000 {
 			reg = <0x0 0xc086f000 0x0 0x3000>;
+			no-map;
+		};
+
+		/* rcpu1 misc-used */
+		rcpu1_misc_used: rcpu1_misc-used@c0872000 {
+			reg = <0x0 0xc0872000 0x0 0x4000>;
+			no-map;
+		};
+
+		sram_for_tcm: sram_for_tcm@c0868000 {
+			reg = <0x0 0xc0868000 0x0 0x4000>;
 			no-map;
 		};
 

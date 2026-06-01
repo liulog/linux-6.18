@@ -20,6 +20,11 @@
 #include <linux/ioctl.h>
 #include <linux/gpio.h>
 #include <linux/regulator/consumer.h>
+#include <media/media-entity.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-subdev.h>
 
 /*
  * IMX415 Configuration: 1920x1080 @ 60fps, 4-lane MIPI
@@ -47,6 +52,22 @@
 
 #define SENSOR_REG_END 0xFFFF
 #define SENSOR_REG_DELAY 0xFFFE
+#define IMX415_LINK_FREQ		742500000ULL
+#define IMX415_PIXEL_RATE		72000000
+#define IMX415_WIDTH			1920
+#define IMX415_HEIGHT			1080
+#define IMX415_HTS			365
+#define IMX415_VTS			2892
+#define IMX415_EXPOSURE_MIN		1
+#define IMX415_EXPOSURE_MAX		2888
+#define IMX415_EXPOSURE_DEF		1000
+#define IMX415_GAIN_MIN			0
+#define IMX415_GAIN_MAX			240
+#define IMX415_GAIN_DEF			0
+
+static const s64 imx415_link_freq_menu[] = {
+	IMX415_LINK_FREQ,
+};
 
 static struct imx415 *global_imx415;
 
@@ -57,12 +78,27 @@ struct imx415 {
 	struct mutex lock;
 	struct regulator *vdd;
 	struct miscdevice miscdev;
+	struct v4l2_subdev sd;
+	struct media_pad pad;
+	struct v4l2_ctrl_handler ctrl_handler;
+	struct v4l2_ctrl *link_freq;
+	struct v4l2_mbus_framefmt fmt;
+	bool powered;
+	bool streaming;
 };
+
+static inline struct imx415 *to_imx415(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct imx415, sd);
+}
 
 struct regval_list {
 	u16 addr;
 	u8 data;
 };
+
+static int imx415_power_on(struct imx415 *sensor);
+static void imx415_power_off(struct imx415 *sensor);
 
 __maybe_unused static struct regval_list imx415_1920x1080_10bit_112fps_tab[] = {
 	// @@1920x1080 crop 112fps 1485Mbps/Lane
@@ -276,6 +312,7 @@ __maybe_unused static struct regval_list imx415_1920x1080_10bit_112fps_tab[] = {
 	{0x4028, 0x4F},  // TLPX[15:0]
 	{0x4029, 0x00},  // TLPX[15:0]
 	{0x4074, 0x00},  // INCKSEL7[2:0]
+	{SENSOR_REG_END, 0x00},
 };
 
 static struct regval_list imx415_1920x1080_12bit_112fps_tab[] = {
@@ -730,6 +767,210 @@ static int imx415_stream_off(struct imx415 *sensor)
 	return imx415_write(sensor, 0x3000, 0x01);
 }
 
+static int imx415_set_exposure(struct imx415 *sensor, u32 exposure)
+{
+	u32 shr0 = IMX415_VTS - exposure;
+	int ret;
+
+	ret = imx415_write(sensor, 0x3050, shr0 & 0xff);
+	if (ret < 0)
+		return ret;
+	ret = imx415_write(sensor, 0x3051, (shr0 >> 8) & 0xff);
+	if (ret < 0)
+		return ret;
+	return imx415_write(sensor, 0x3052, (shr0 >> 16) & 0x0f);
+}
+
+static int imx415_set_analogue_gain(struct imx415 *sensor, u32 gain)
+{
+	int ret;
+
+	ret = imx415_write(sensor, 0x3090, gain & 0xff);
+	if (ret < 0)
+		return ret;
+	return imx415_write(sensor, 0x3091, (gain >> 8) & 0x01);
+}
+
+static int imx415_set_vblank(struct imx415 *sensor, u32 vblank)
+{
+	u32 vts = IMX415_HEIGHT + vblank;
+	int ret;
+
+	ret = imx415_write(sensor, 0x3024, vts & 0xff);
+	if (ret < 0)
+		return ret;
+	ret = imx415_write(sensor, 0x3025, (vts >> 8) & 0xff);
+	if (ret < 0)
+		return ret;
+	return imx415_write(sensor, 0x3026, (vts >> 16) & 0x0f);
+}
+
+static int imx415_set_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct imx415 *sensor =
+		container_of(ctrl->handler, struct imx415, ctrl_handler);
+
+	if (!sensor->powered)
+		return 0;
+
+	switch (ctrl->id) {
+	case V4L2_CID_EXPOSURE:
+		return imx415_set_exposure(sensor, ctrl->val);
+	case V4L2_CID_ANALOGUE_GAIN:
+		return imx415_set_analogue_gain(sensor, ctrl->val);
+	case V4L2_CID_VBLANK:
+		return imx415_set_vblank(sensor, ctrl->val);
+	default:
+		return 0;
+	}
+}
+
+static const struct v4l2_ctrl_ops imx415_ctrl_ops = {
+	.s_ctrl = imx415_set_ctrl,
+};
+
+static int imx415_init_controls(struct imx415 *sensor)
+{
+	struct v4l2_ctrl_handler *hdl = &sensor->ctrl_handler;
+	u32 hblank = IMX415_HTS > IMX415_WIDTH ? IMX415_HTS - IMX415_WIDTH : 0;
+	u32 vblank = IMX415_VTS - IMX415_HEIGHT;
+	int ret;
+
+	v4l2_ctrl_handler_init(hdl, 6);
+	v4l2_ctrl_new_std(hdl, &imx415_ctrl_ops, V4L2_CID_PIXEL_RATE,
+			  IMX415_PIXEL_RATE, IMX415_PIXEL_RATE, 1,
+			  IMX415_PIXEL_RATE);
+	sensor->link_freq = v4l2_ctrl_new_int_menu(hdl, &imx415_ctrl_ops,
+						   V4L2_CID_LINK_FREQ, 0, 0,
+						   imx415_link_freq_menu);
+	if (sensor->link_freq)
+		sensor->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	v4l2_ctrl_new_std(hdl, &imx415_ctrl_ops, V4L2_CID_HBLANK,
+			  hblank, hblank, 1, hblank);
+	v4l2_ctrl_new_std(hdl, &imx415_ctrl_ops, V4L2_CID_VBLANK,
+			  vblank, 0xffff - IMX415_HEIGHT, 1, vblank);
+	v4l2_ctrl_new_std(hdl, &imx415_ctrl_ops, V4L2_CID_EXPOSURE,
+			  IMX415_EXPOSURE_MIN, IMX415_EXPOSURE_MAX, 1,
+			  IMX415_EXPOSURE_DEF);
+	v4l2_ctrl_new_std(hdl, &imx415_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+			  IMX415_GAIN_MIN, IMX415_GAIN_MAX, 1,
+			  IMX415_GAIN_DEF);
+
+	if (hdl->error) {
+		ret = hdl->error;
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
+
+	sensor->sd.ctrl_handler = hdl;
+	return 0;
+}
+
+static int imx415_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct imx415 *sensor = to_imx415(sd);
+	int ret = 0;
+
+	if (enable) {
+		if (!sensor->powered) {
+			ret = imx415_power_on(sensor);
+			if (ret)
+				return ret;
+			ret = imx415_write_array(sensor,
+						 imx415_1920x1080_12bit_112fps_tab);
+			if (ret)
+				goto err_power;
+			ret = v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
+			if (ret)
+				goto err_power;
+		}
+		ret = imx415_stream_on(sensor);
+		if (!ret)
+			sensor->streaming = true;
+	} else {
+		if (sensor->streaming)
+			ret = imx415_stream_off(sensor);
+		sensor->streaming = false;
+		if (sensor->powered)
+			imx415_power_off(sensor);
+	}
+
+	return ret;
+
+err_power:
+	imx415_power_off(sensor);
+	return ret;
+}
+
+static int imx415_enum_mbus_code(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *state,
+				 struct v4l2_subdev_mbus_code_enum *code)
+{
+	if (code->index)
+		return -EINVAL;
+
+	code->code = MEDIA_BUS_FMT_SRGGB12_1X12;
+	return 0;
+}
+
+static int imx415_get_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_subdev_state *state,
+			  struct v4l2_subdev_format *fmt)
+{
+	struct imx415 *sensor = to_imx415(sd);
+
+	fmt->format = sensor->fmt;
+	return 0;
+}
+
+static int imx415_set_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_subdev_state *state,
+			  struct v4l2_subdev_format *fmt)
+{
+	struct imx415 *sensor = to_imx415(sd);
+
+	fmt->format.code = MEDIA_BUS_FMT_SRGGB12_1X12;
+	fmt->format.width = IMX415_WIDTH;
+	fmt->format.height = IMX415_HEIGHT;
+	fmt->format.field = V4L2_FIELD_NONE;
+	fmt->format.colorspace = V4L2_COLORSPACE_RAW;
+
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		sensor->fmt = fmt->format;
+
+	return 0;
+}
+
+static int imx415_enum_frame_size(struct v4l2_subdev *sd,
+				  struct v4l2_subdev_state *state,
+				  struct v4l2_subdev_frame_size_enum *fse)
+{
+	if (fse->index || fse->code != MEDIA_BUS_FMT_SRGGB12_1X12)
+		return -EINVAL;
+
+	fse->min_width = IMX415_WIDTH;
+	fse->max_width = IMX415_WIDTH;
+	fse->min_height = IMX415_HEIGHT;
+	fse->max_height = IMX415_HEIGHT;
+	return 0;
+}
+
+static const struct v4l2_subdev_video_ops imx415_video_ops = {
+	.s_stream = imx415_s_stream,
+};
+
+static const struct v4l2_subdev_pad_ops imx415_pad_ops = {
+	.enum_mbus_code = imx415_enum_mbus_code,
+	.get_fmt = imx415_get_fmt,
+	.set_fmt = imx415_set_fmt,
+	.enum_frame_size = imx415_enum_frame_size,
+};
+
+static const struct v4l2_subdev_ops imx415_subdev_ops = {
+	.video = &imx415_video_ops,
+	.pad = &imx415_pad_ops,
+};
+
 static int imx415_detect(struct imx415 *sensor)
 {
 	u8 lo, hi;
@@ -790,6 +1031,9 @@ static int imx415_power_on(struct imx415 *sensor)
 {
 	int ret = 0;
 
+	if (sensor->powered)
+		return 0;
+
 	dev_info(&sensor->client->dev, "imx415-test: power_on enter\n");
 
 	/* Set I2C mux to select this sensor */
@@ -832,12 +1076,16 @@ static int imx415_power_on(struct imx415 *sensor)
 	}
 
 	dev_info(&sensor->client->dev, "imx415-test: power_on done\n");
+	sensor->powered = true;
 
 	return 0;
 }
 
 static void imx415_power_off(struct imx415 *sensor)
 {
+	if (!sensor->powered)
+		return;
+
 	dev_info(&sensor->client->dev, "imx415-test: power_off enter\n");
 
 	if (sensor->pwdn) {
@@ -855,6 +1103,7 @@ static void imx415_power_off(struct imx415 *sensor)
 		gpiod_set_value_cansleep(sensor->i2c_mux, 0);
 	}
 
+	sensor->powered = false;
 	dev_info(&sensor->client->dev, "imx415-test: power_off done\n");
 }
 
@@ -932,6 +1181,11 @@ static int imx415_probe(struct i2c_client *client)
 	sensor->client = client;
 	mutex_init(&sensor->lock);
 	i2c_set_clientdata(client, sensor);
+	sensor->fmt.code = MEDIA_BUS_FMT_SRGGB12_1X12;
+	sensor->fmt.width = IMX415_WIDTH;
+	sensor->fmt.height = IMX415_HEIGHT;
+	sensor->fmt.field = V4L2_FIELD_NONE;
+	sensor->fmt.colorspace = V4L2_COLORSPACE_RAW;
 
 	/* Get power-down GPIO */
 	sensor->pwdn = devm_gpiod_get_optional(
@@ -963,6 +1217,31 @@ static int imx415_probe(struct i2c_client *client)
 	}
 
 	imx415_power_off(sensor);
+
+	v4l2_i2c_subdev_init(&sensor->sd, client, &imx415_subdev_ops);
+	sensor->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sensor->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	sensor->pad.flags = MEDIA_PAD_FL_SOURCE;
+	ret = media_entity_pads_init(&sensor->sd.entity, 1, &sensor->pad);
+	if (ret) {
+		dev_err(dev, "imx415-test: failed to init media pads: %d\n",
+			ret);
+		goto err_media_entity;
+	}
+
+	ret = imx415_init_controls(sensor);
+	if (ret) {
+		dev_err(dev, "imx415-test: failed to init controls: %d\n",
+			ret);
+		goto err_ctrls;
+	}
+
+	ret = v4l2_async_register_subdev(&sensor->sd);
+	if (ret) {
+		dev_err(dev, "imx415-test: failed to register subdev: %d\n",
+			ret);
+		goto err_subdev;
+	}
 
 	sensor->miscdev.minor = MISC_DYNAMIC_MINOR;
 	sensor->miscdev.fops = &imx415_fops;
@@ -1001,6 +1280,12 @@ static int imx415_probe(struct i2c_client *client)
 	return 0;
 
 err_misc_register:
+	v4l2_async_unregister_subdev(&sensor->sd);
+err_subdev:
+	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
+err_ctrls:
+	media_entity_cleanup(&sensor->sd.entity);
+err_media_entity:
 	imx415_power_off(sensor);
 	mutex_destroy(&sensor->lock);
 	return ret;
@@ -1021,6 +1306,9 @@ static void imx415_remove(struct i2c_client *client)
 		global_imx415 = NULL;
 
 	misc_deregister(&sensor->miscdev);
+	v4l2_async_unregister_subdev(&sensor->sd);
+	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
+	media_entity_cleanup(&sensor->sd.entity);
 	imx415_power_off(sensor);
 	mutex_destroy(&sensor->lock);
 }
@@ -1044,4 +1332,3 @@ module_i2c_driver(imx415_driver)
 
 MODULE_DESCRIPTION("Simplified I2C driver for IMX415");
 MODULE_LICENSE("GPL v2");
-

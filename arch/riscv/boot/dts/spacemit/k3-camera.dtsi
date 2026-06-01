@@ -71,6 +71,25 @@
 			 <&syscon_apmu RESET_APMU_ISP_CIBUS>;
 		reset-names = "csi_reset", "ccic_4x_reset",
 			      "sc2_hclk_reset", "isp_cibus_reset";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ccic0_in: endpoint@0 {
+					reg = <0>;
+				};
+
+				ccic0_in_alt: endpoint@1 {
+					reg = <1>;
+				};
+			};
+		};
 	};
 
 	ccic1: cam_ccic@d420a800 {
@@ -95,6 +114,25 @@
 			 <&syscon_apmu RESET_APMU_ISP_CIBUS>;
 		reset-names = "csi_reset", "ccic_4x_reset",
 			      "sc2_hclk_reset", "isp_cibus_reset";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ccic1_in: endpoint@0 {
+					reg = <0>;
+				};
+
+				ccic1_in_alt: endpoint@1 {
+					reg = <1>;
+				};
+			};
+		};
 	};
 
 	ccic2: cam_ccic@d4206000 {
@@ -119,6 +157,25 @@
 			 <&syscon_apmu RESET_APMU_ISP_CIBUS>;
 		reset-names = "csi_reset", "ccic_4x_reset",
 			      "sc2_hclk_reset", "isp_cibus_reset";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ccic2_in: endpoint@0 {
+					reg = <0>;
+				};
+
+				ccic2_in_alt: endpoint@1 {
+					reg = <1>;
+				};
+			};
+		};
 	};
 
 	ccic3: cam_ccic@d4206800 {
@@ -143,6 +200,25 @@
 			 <&syscon_apmu RESET_APMU_ISP_CIBUS>;
 		reset-names = "csi_reset", "ccic_4x_reset",
 			      "sc2_hclk_reset", "isp_cibus_reset";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ccic3_in: endpoint@0 {
+					reg = <0>;
+				};
+
+				ccic3_in_alt: endpoint@1 {
+					reg = <1>;
+				};
+			};
+		};
 	};
 
 	ccic_dma: cam_ccic_dma@d420f000 {
