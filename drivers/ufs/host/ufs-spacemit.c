@@ -139,7 +139,7 @@ static void ufs_spacemit_dump_host_regs(struct ufs_hba *hba)
 	}
 	len += scnprintf(buf + len, VENDOR_DUMP_BUF_SIZE - len, "\n");
 
-	dev_warn(hba->dev, "%s", buf);
+	dev_dbg(hba->dev, "%s", buf);
 
 	kfree(buf);
 }
@@ -465,7 +465,7 @@ static int ufs_spacemit_link_startup_post_change(struct ufs_hba *hba)
 		ufshcd_dme_get(hba,
 			       UIC_ARG_MIB_SEL(0xC1, UIC_ARG_MPHY_RX_GEN_SEL_INDEX(1)),
 			       &rx1_fsm_status);
-		dev_err(hba->dev, "ufs: send dummy frame, rx1_fsm_status:0x%x\n",
+		dev_dbg(hba->dev, "ufs: send dummy frame, rx1_fsm_status:0x%x\n",
 			rx1_fsm_status);
 	}
 
@@ -492,7 +492,7 @@ static int ufs_spacemit_link_startup_notify(struct ufs_hba *hba,
 	}
 
 	if (err)
-		dev_err(hba->dev, "%s: status=%d failed: %d\n", __func__, status, err);
+		dev_dbg(hba->dev, "%s: status=%d failed: %d\n", __func__, status, err);
 
 	return err;
 }
