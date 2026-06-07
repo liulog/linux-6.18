@@ -12,6 +12,7 @@
 | 主题 | 在线（GitHub Pages） | 仓库内文件 |
 |---|---|---|
 | RISC-V Sv39 早期页表构建过程<br>（`_start` → `init` 之前） | 🎬 [步进播放器](https://liulog.github.io/riscv-sv39-pagetable-bringup.html) · 📖 [文档](https://liulog.github.io/riscv-sv39-pagetable-bringup-doc.html) | [.md](docs/riscv-sv39-pagetable-bringup.md) · [.html](docs/riscv-sv39-pagetable-bringup.html) |
+| RISC-V `satp` 与 `sfence.vma` 语义详解<br>（Bare↔分页瞬间、TLB stale、sfence 时机） | 📖 [文档](https://liulog.github.io/riscv-satp-sfence-semantics.html) | [.md](docs/riscv-satp-sfence-semantics.md) |
 
 > 💡 **使用说明**
 > - **在线版（推荐）**：上表中的 Pages 链接 GitHub 网页点击即可直接在浏览器渲染播放
