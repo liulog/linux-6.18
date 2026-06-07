@@ -25,7 +25,40 @@
 
 ---
 
-## 1. spec 怎么说（语义摘要）
+## 1. 30 秒心智模型（一句话记住）
+
+> **`satp` 是开关，`sfence.vma` 是同步器，两者正交。**
+
+具体一点：
+
+### 0.1 `sfence.vma` 做且仅做两件事
+
+1. **内存序栅栏**：保证此指令之前对 in-memory PTE/PGD 等结构的 **store**，对此指令之后的**隐式翻译访问（PTW）** 可见。
+   - 是 store→PTW 的栅栏，不是 store→普通 load 的栅栏（那是 `fence rw,rw`）
+   - 只对当前 hart 已经可见的 store 生效；跨 hart 要靠 IPI + 远端各自执行 sfence.vma（这就是 `SBI RFENCE` 的活）
+2. **TLB 失效**：按 `rs1` (vaddr) 和 `rs2` (asid) 作废 TLB 条目，四个变体：
+
+   | `rs1` | `rs2` | 作用 | Global 项是否清掉 |
+   |---|---|---|---|
+   | `x0` | `x0` | 作废全部 | **会清** |
+   | `vaddr` | `x0` | 作废涉及 vaddr 的所有 ASID 的项 | 涉及 vaddr 的全部 |
+   | `x0` | `asid` | 作废指定 ASID 的所有项 | **不清** |
+   | `vaddr` | `asid` | 最细粒度 | 不清（除非 vaddr 的项被标 G） |
+
+   > Linux 中 `local_flush_tlb_all()` (`tlbflush.h:18-21`) 直接展开成 `sfence.vma`（即 x0,x0 变体），把 Global 项也清光；`local_flush_tlb_all_asid(asid)` (`tlbflush.h:23-29`) 走 `ASID` 变体，保留 G 项。
+
+### 0.2 `satp` 写入即生效
+
+- `csrw satp, X` 写完，**下一条指令立刻** 用新 satp 做 fetch / load / store 的翻译——不需要 sfence.vma 来"激活"。
+- 唯一的"缓存惯性"：TLB 里可能残留**前一个 satp 时代**的条目，命中时给出旧映射。要保证之后只看到新映射，才需要 sfence.vma。
+- 因此：
+  - **Bare → 分页**：之前没用 TLB，没有残留，写完就干净（head.S 第一次写 satp 之后**不放** sfence.vma 正是这道理）
+  - **分页 → 另一张分页表**：TLB 可能残留，**需要** sfence.vma 清干净（head.S 第二次写 satp 之后立刻 sfence）
+  - **分页 → Bare**：写完即按 PA 寻址，下一条指令的 PC 数值必须本身就是合法 PA（少见，需提前布好 identity 映射）
+
+---
+
+## 2. spec 怎么说（语义摘要）
 
 为方便后文引用，先把 RISC-V Privileged Spec Vol II 关于 satp 和 SFENCE.VMA 的几条规则浓缩成中文（**意译，非逐字**）：
 
@@ -60,7 +93,7 @@
 
 ---
 
-## 2. 三个问题逐个拆解
+## 3. 三个问题逐个拆解
 
 ### 2.1 Q1：`satp = 0 → 非零`，下一条指令立刻用新表吗？
 
@@ -233,7 +266,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 3. 把 Q3 串成一个判定流程
+## 4. 把 Q3 串成一个判定流程
 
 > 写完 satp 的下一条指令能否成功 fetch？
 
@@ -272,7 +305,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 4. Linux 代码里所有写 satp 的位置（一览）
+## 5. Linux 代码里所有写 satp 的位置（一览）
 
 | 文件:行 | 写 satp 的目的 | satp 旧值 → 新值 | sfence.vma 时机 |
 |---|---|---|---|
@@ -292,7 +325,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 5. 反过来回答"假如不放 sfence.vma 会怎样"
+## 6. 反过来回答"假如不放 sfence.vma 会怎样"
 
 | 漏放位置 | 可能后果 |
 |---|---|
@@ -303,7 +336,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 6. 常见误解辨析
+## 7. 常见误解辨析
 
 > **"csrw satp 之后必须 sfence.vma 才能让新表生效"** ❌
 > 不准确。spec 保证 csrw 写完，下一条指令开始时 satp 已是新值；sfence.vma 是为了 **清 TLB stale**，不是为了 **激活 satp**。
@@ -322,7 +355,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 7. 把所有事实摆在一起的总图
+## 8. 把所有事实摆在一起的总图
 
 ```
                   csrw satp, NEW
@@ -349,7 +382,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 8. 参考
+## 9. 参考
 
 - **RISC-V Privileged Architecture Spec, Vol II**（最新版可在 <https://riscv.org/technical/specifications/> 下载）：
   - "Supervisor Address Translation and Protection (satp) Register" — satp 字段与写入语义
