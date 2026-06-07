@@ -13,13 +13,14 @@
 
 ---
 
-## 0. TL;DR — 三个问题的结论
+## 0. TL;DR — 四个问题的结论
 
 | 问题 | 结论 | 关键依据 |
 |---|---|---|
 | Q1. `satp=0 → 非零`，下一条指令是否立即用新表？ | **是。** 紧跟 `csrw satp` 的那条指令的 fetch 就用新 satp 翻译；如果新表里没有当前 PC 对应的 VA，会立刻 instruction page fault。这正是 head.S 用 stvec trick 完成"PA→VA 跳转"的硬件前提。 | Priv Spec satp 一节："the new contents are observed by subsequent instructions"；head.S:96-106 stvec trick 全依赖此。 |
 | Q2. `satp=非零 → 0`（Bare），下一条指令是否立即按 PA？ | **是。** 对称地立即生效。**实际上几乎不会被这样用**：若上一条 PC 是高地址 VA，下一条 PA fetch 会指向不存在的物理地址 → 立即崩。要安全做这种切换必须先保证下一条指令所在地址 VA==PA 可达（identity mapping 或低地址 PA）。 | Priv Spec satp 一节 (MODE 字段语义)；kexec/cpu_resume 等少数路径才会这么干，且都预先准备好 identity 映射。 |
 | Q3. `csrw satp; sfence.vma` 那条 fence 怎么 fetch 成功？ | **取决于**："新 satp 下当前 PC 那一页的翻译是否仍合法"。三种情况之一即可：(a) 新表里这一页映射不变（VA→同一 PA）；(b) TLB 里还残留旧表对这一页的条目，且仍正确；(c) (a) 与 (b) 同时成立。Linux head.S 第二次写 satp 时显式靠 (a) —— 注释 "the first superpage is translated the same way"。 | head.S:116-120 注释；Priv Spec 关于"实现可以使用此前 satp 留下的 cached translation"。 |
+| Q4. `satp=非零 → 另一个非零`，新表里没这条 VA 的映射，**但 TLB 里有旧 satp 留下的 stale 条目**，下一条 fetch 会因为 TLB 命中而"意外成功"吗？ | **可能。** Spec 允许实现使用未被 SFENCE.VMA 作废的 cached translation。**前提**是新旧 satp 用同一 ASID（或不开 ASID）：此时旧 TLB 项的 `(VA, ASID)` 标签和新查找匹配，可能命中给出旧映射。**这是 set_mm_noasid 切完 satp 必须 `local_flush_tlb_all()` 的根本原因**，注释直接写 "blindly nuke entire local TLB"。开 ASID 时新进程换 ASID，旧 ASID 的项不会被命中（带 G 的内核项跨 ASID 但全局稳定），因此 set_mm_asid 常规切换可以跳过 sfence。 | `context.c:200-205`；Priv Spec 关于 ASID-tagged TLB 与 SFENCE.VMA。详见 §6。 |
 
 下面三个问题分别展开。
 
@@ -93,7 +94,7 @@
 
 ---
 
-## 3. 三个问题逐个拆解
+## 3. 三个问题逐个拆解（Q4 单独成节，见 §6）
 
 ### 2.1 Q1：`satp = 0 → 非零`，下一条指令立刻用新表吗？
 
@@ -325,7 +326,100 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 6. 反过来回答"假如不放 sfence.vma 会怎样"
+## 6. Q4：`satp` 非零 → 非零，stale TLB 能不能让访问"意外成功"？
+
+**结论：可能，且这正是 ASID-less 切换必须显式 sfence 的根本原因。**
+
+### 6.1 场景复述
+
+设：
+
+- 切换前 `satp = OLD`（某进程或某早期表）
+- 切换后 `satp = NEW`，**NEW 表里某 VA `P` 没有映射**
+- 中间没有 SFENCE.VMA
+- 紧接着 CPU 要 fetch 或访问地址 `P`
+
+按 spec：
+- 走 NEW 表 walk → fail（NEW 里没这条映射）
+- TLB 查找：若 OLD 时期 `P` 被走过表 → TLB 里有条目 → 按 `(VA, ASID)` 标签匹配查找请求 → **若标签匹配，TLB hit 返回旧映射 → 访问成功！**
+
+也就是说，**切了 satp 却像没切**。Spec 原话精神：实现可以使用任何在最近一次相关 SFENCE.VMA 之前曾对该 VA 合法的 cached translation。
+
+### 6.2 决定是否真发生的两个因素
+
+**因素 A：ASID 标签匹配**
+
+TLB 条目的标签包含 `(VA, ASID)`（带 G 标志的项忽略 ASID）。新查找用的 ASID 来自**新 satp.ASID**。
+
+| 场景 | 新旧 satp ASID | TLB 标签匹配？ | 后果 |
+|---|---|---|---|
+| 不开 ASID（`use_asid_allocator=false`） | 旧 0，新 0 | **匹配** | 旧的所有非 G 项都可能被命中 |
+| 开 ASID，切到新进程（rollover 之外） | ASID_a → ASID_b | **不匹配**（除带 G 的项） | 用户态映射自动隔离，内核态（G 项）跨进程不变 |
+| 开 ASID，ASID 复用（rollover） | ASID_x（旧含义）→ ASID_x（新含义） | **匹配** | 必须显式 flush，否则用旧映射 |
+
+**因素 B：硬件 TLB 的替换/查询策略**
+
+哪怕标签匹配，TLB 容量有限，旧条目可能已被新表的项挤掉。所以"是否命中"是个**实现相关的概率事件**——这正是 spec 不会让你"靠它救程序"的原因，你必须假设 worst case。
+
+### 6.3 Linux 中的实证：`set_mm_noasid` vs `set_mm_asid`
+
+**ASID-less 路径** (`arch/riscv/mm/context.c:200-205`)：
+
+```c
+static void set_mm_noasid(struct mm_struct *mm)
+{
+    /* Switch the page table and blindly nuke entire local TLB */
+    csr_write(CSR_SATP, virt_to_pfn(mm->pgd) | satp_mode);
+    local_flush_tlb_all();        // ← 必须！原因就是 §6.1 的 stale 命中
+}
+```
+
+注释 "blindly nuke entire local TLB" 写得很直白：因为不开 ASID 时无法靠标签隔离，**只能粗暴清光**。
+否则上一个进程的用户态映射会被新进程"意外继承"——既是安全漏洞（看到别的进程的数据），也是正确性 bug（写到别的进程的页）。
+
+**ASID 路径** (`arch/riscv/mm/context.c:144-198` 的 `set_mm_asid`)：
+
+```c
+switch_mm_fast:
+    csr_write(CSR_SATP, virt_to_pfn(mm->pgd) |
+              (cntx2asid(cntx) << SATP_ASID_SHIFT) |
+              satp_mode);
+
+    if (need_flush_tlb)
+        local_flush_tlb_all();
+```
+
+常规情况 `need_flush_tlb=false`，**没有 sfence.vma**——为什么这次安全？因为切换前后 ASID 不同，旧 ASID 标签的项与新查找标签不匹配，硬件自动隔离。
+只有 ASID rollover（这个 ASID 编号被复用给新进程）时 `need_flush_tlb=true`，必须 flush。这是 ASID 机制的核心价值：把"必须 sfence 的频率"从"每次进程切换"降到"每轮 ASID 用完一次"。
+
+### 6.4 反过来：head.S 第二次写 satp 为什么不用怕 stale "意外成功"？
+
+trampoline → early 切换时，恰好两表对当前 PC 那一页**映射完全相同**：
+
+- 走 NEW (early) 表：成功，结果 PA=kernel_phys
+- TLB 命中 OLD (trampoline) 的 stale 条目：结果 PA=kernel_phys
+
+**两条路径结果一致**。所以这次"是否使用 stale"无所谓，怎么走都对。注释 "the first superpage is translated the same way" 正是此意。
+
+之后那条 `sfence.vma` 才是用来清掉 trampoline 期间可能 cache 进的**其他 VA**（比如如果 walker 预取过 fixmap 路径，虽然 trampoline 没填）的 stale 条目，确保后续 fixmap 等访问一定 walk early 表。
+
+### 6.5 教训：编写涉及 satp 切换的代码时的 checklist
+
+1. **新旧 satp 是否会出现"新表无映射 + 旧 TLB 仍可能命中"的 VA？**
+   - 如果新进程的用户态 VA 和旧进程不同、又同 ASID → ✅ 是 → 必须 sfence
+   - 如果开 ASID 且未 rollover → ❌ 不会被命中 → 可以省 sfence
+
+2. **当前 PC 那一页在新表 walk 结果与旧表是否一致？**
+   - 一致（head.S 那种）→ 切换瞬间无论靠 walk 还是 stale 都正确
+   - 不一致 → 必须保证 sfence 在切到该 PC 之前已经清掉 stale
+
+3. **是否依赖 stale 命中"救场"？**
+   - **永远不要**。哪怕硬件如此，spec 不保证、未来 CPU 也可能不命中。
+   - "意外成功"只是 bug 的另一种表现，比 page fault 更难调试。
+
+---
+
+## 7. 反过来回答"假如不放 sfence.vma 会怎样"
 
 | 漏放位置 | 可能后果 |
 |---|---|
@@ -336,7 +430,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 7. 常见误解辨析
+## 8. 常见误解辨析
 
 > **"csrw satp 之后必须 sfence.vma 才能让新表生效"** ❌
 > 不准确。spec 保证 csrw 写完，下一条指令开始时 satp 已是新值；sfence.vma 是为了 **清 TLB stale**，不是为了 **激活 satp**。
@@ -355,7 +449,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 8. 把所有事实摆在一起的总图
+## 9. 把所有事实摆在一起的总图
 
 ```
                   csrw satp, NEW
@@ -382,7 +476,7 @@ csrw CSR_SATP, a0                   # satp = trampoline
 
 ---
 
-## 9. 参考
+## 10. 参考
 
 - **RISC-V Privileged Architecture Spec, Vol II**（最新版可在 <https://riscv.org/technical/specifications/> 下载）：
   - "Supervisor Address Translation and Protection (satp) Register" — satp 字段与写入语义
