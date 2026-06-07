@@ -9,15 +9,14 @@
 
 ## 📚 项目文档与可视化
 
-| 主题 | Markdown 文档 | 可视化 |
+| 主题 | 在线（GitHub Pages） | 仓库内文件 |
 |---|---|---|
-| RISC-V Sv39 早期页表构建过程（`_start` → `init` 之前） | [📖 文档](docs/riscv-sv39-pagetable-bringup.md) | [🎬 步进播放器 (HTML)](docs/riscv-sv39-pagetable-bringup.html) |
+| RISC-V Sv39 早期页表构建过程<br>（`_start` → `init` 之前） | 🎬 [步进播放器](https://liulog.github.io/riscv-sv39-pagetable-bringup.html) · 📖 [文档](https://liulog.github.io/riscv-sv39-pagetable-bringup-doc.html) | [.md](docs/riscv-sv39-pagetable-bringup.md) · [.html](docs/riscv-sv39-pagetable-bringup.html) |
 
-> 💡 **HTML 播放器使用说明**
-> - 单文件、零外部依赖（50 KB），双击或在浏览器中打开 `docs/riscv-sv39-pagetable-bringup.html` 即可
-> - 在 VS Code Markdown 预览 / Obsidian / Typora / 本地 Gitea 中点击上面的 🎬 链接会直接在浏览器中弹出
-> - 键盘快捷键：`←/→` 步进 · `Space` 自动播放 · `R` 重置 · `1-9,0` 跳转到对应步骤
-> - 注：GitHub 网页出于安全策略不会内联渲染 HTML，需要 clone 后本地打开
+> 💡 **使用说明**
+> - **在线版（推荐）**：上表中的 Pages 链接 GitHub 网页点击即可直接在浏览器渲染播放
+> - **本地版**：clone 后双击 `docs/riscv-sv39-pagetable-bringup.html` 也能直接打开（零外部依赖，50 KB）
+> - **键盘快捷键**：`←/→` 步进 · `Space` 自动播放 · `R` 重置 · `1-9,0` 跳转到对应步骤
 
 ---
 
