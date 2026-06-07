@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>RISC-V Sv39 页表构建过程 · 步进播放器</title>
+<style>
+  :root {
+    --bg:         #0f1419;
+    --panel:      #1a2128;
+    --panel-2:    #232c36;
+    --border:     #2d3640;
+    --text:       #e6e9ec;
+    --text-dim:   #8b949e;
+    --accent:     #7ee787;  /* mapped / active */
+    --warn:       #ffa657;  /* just changed */
+    --info:       #79c0ff;  /* satp on */
+    --code:       #d2a8ff;
+    --unmapped:   #3a444e;
+    --kernel:     #f97583;
+    --fixmap:     #ffa657;
+    --linear:     #7ee787;
+    --vmalloc:    #79c0ff;
+    --vmemmap:    #d2a8ff;
+    --modules:    #ffd33d;
+    --pci:        #56d4dd;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Segoe UI", "Microsoft Yahei", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    height: 100%;
+    overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* Header */
+  header {
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 16px; font-weight: 600;
+    color: var(--accent);
+  }
+  header h1 .sub { color: var(--text-dim); font-weight: 400; margin-left: 8px; }
+  .ctrls { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .ctrls button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .ctrls button:hover { background: #2d3640; border-color: var(--info); }
+  .ctrls button.primary { background: var(--info); color: var(--bg); border-color: var(--info); }
+  .ctrls button.primary:hover { background: #5bb0ff; }
+  .ctrls button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ctrls .step-counter {
+    color: var(--text-dim);
+    font-family: monospace;
+    font-size: 13px;
+    padding: 0 8px;
+  }
+  .ctrls .step-counter b { color: var(--accent); font-size: 15px; }
+
+  /* Main layout */
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    overflow: hidden;
+  }
+
+  /* Step list sidebar */
+  aside.steps {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px 0;
+  }
+  aside.steps .step-item {
+    padding: 10px 16px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    font-size: 13px;
+    transition: background 0.15s;
+  }
+  aside.steps .step-item:hover { background: var(--panel-2); }
+  aside.steps .step-item.active {
+    background: var(--panel-2);
+    border-left-color: var(--accent);
+    color: var(--accent);
+  }
+  aside.steps .step-item .num {
+    font-family: monospace;
+    color: var(--text-dim);
+    margin-right: 6px;
+  }
+  aside.steps .step-item.active .num { color: var(--accent); }
+  aside.steps .group-label {
+    padding: 8px 16px 4px;
+    color: var(--text-dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Content panels */
+  section.content {
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    gap: 10px;
+    padding: 12px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow: auto;
+  }
+  .panel h2 {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel h2 .stage-badge {
+    background: var(--panel-2);
+    color: var(--info);
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  /* Step description panel (top) */
+  .panel.description {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+  }
+  .panel.description .desc-text {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .panel.description .desc-text .title {
+    font-size: 15px; font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .panel.description .desc-text code {
+    background: var(--panel-2);
+    color: var(--code);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .panel.description .desc-text .key {
+    color: var(--warn);
+    font-weight: 600;
+  }
+  .panel.description .code-pane {
+    background: #0a0e12;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.55;
+    overflow: auto;
+    color: var(--text);
+  }
+  .panel.description .code-pane .line-num {
+    color: var(--text-dim);
+    margin-right: 8px;
+    user-select: none;
+    display: inline-block;
+    width: 28px;
+    text-align: right;
+  }
+  .panel.description .code-pane .hl {
+    background: rgba(126, 231, 135, 0.12);
+    border-left: 2px solid var(--accent);
+    padding-left: 4px;
+    margin-left: -6px;
+    display: block;
+  }
+  .panel.description .code-pane .file {
+    color: var(--text-dim);
+    font-size: 10.5px;
+    margin-bottom: 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* satp register panel */
+  .panel.satp { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
+  .satp-reg {
+    display: grid;
+    grid-template-columns: auto auto auto auto;
+    gap: 4px;
+    align-items: center;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+  }
+  .satp-reg .field {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 4px;
+    text-align: center;
+    transition: all 0.3s;
+  }
+  .satp-reg .field.changed {
+    border-color: var(--warn);
+    background: rgba(255, 166, 87, 0.12);
+    animation: flash 0.6s;
+  }
+  @keyframes flash {
+    0% { background: rgba(255, 166, 87, 0.5); }
+    100% { background: rgba(255, 166, 87, 0.12); }
+  }
+  .satp-reg .field .label {
+    display: block;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+  .satp-reg .field .val {
+    display: block;
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .satp-reg .field.zero .val { color: var(--text-dim); }
+  .satp-reg .sep { color: var(--text-dim); padding: 0 2px; }
+
+  .cpu-state {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 12px;
+    font-size: 12px;
+    align-content: start;
+  }
+  .cpu-state dt {
+    color: var(--text-dim);
+    font-family: monospace;
+    text-align: right;
+  }
+  .cpu-state dd {
+    font-family: monospace;
+    color: var(--text);
+  }
+  .cpu-state dd .on { color: var(--accent); font-weight: 600; }
+  .cpu-state dd .off { color: var(--text-dim); }
+  .cpu-state dd .warn { color: var(--warn); font-weight: 600; }
+  .cpu-state dd code {
+    background: var(--panel-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: var(--code);
+    font-size: 11px;
+  }
+
+  /* Page tables + VA map row */
+  .row-bottom {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr;
+    gap: 10px;
+    overflow: hidden;
+  }
+  .row-bottom > .panel { overflow: auto; }
+
+  /* Page tables panel */
+  .pgtable-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .pgtable {
+    background: var(--panel-2);
+    border: 2px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    font-family: monospace;
+    font-size: 11px;
+    transition: all 0.3s;
+  }
+  .pgtable.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 12px rgba(126, 231, 135, 0.25);
+  }
+  .pgtable.empty { opacity: 0.4; }
+  .pgtable h3 {
+    font-size: 12px;
+    color: var(--info);
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .pgtable.active h3 { color: var(--accent); }
+  .pgtable h3 .tag {
+    background: var(--panel);
+    color: var(--text-dim);
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: normal;
+  }
+  .pgtable.active h3 .tag { background: var(--accent); color: var(--bg); }
+  .pgtable .level {
+    margin: 6px 0;
+    padding-left: 8px;
+    border-left: 2px solid var(--border);
+  }
+  .pgtable .level .lvl-name {
+    color: var(--text-dim);
+    font-size: 10px;
+    margin-bottom: 2px;
+  }
+  .pgtable .entry {
+    padding: 2px 6px;
+    margin: 1px 0;
+    background: var(--panel);
+    border-radius: 3px;
+    color: var(--text);
+    font-size: 10.5px;
+  }
+  .pgtable .entry.new {
+    background: rgba(255, 166, 87, 0.18);
+    color: var(--warn);
+    animation: flash 0.6s;
+  }
+  .pgtable .entry .idx {
+    color: var(--info);
+    margin-right: 4px;
+  }
+  .pgtable .entry .arrow { color: var(--text-dim); margin: 0 4px; }
+  .pgtable .entry .leaf-prot {
+    color: var(--code);
+    font-size: 10px;
+    margin-left: 4px;
+  }
+  .pgtable .placeholder {
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 10.5px;
+    padding: 2px 6px;
+  }
+
+  /* VA map panel */
+  .vamap {
+    display: flex; flex-direction: column;
+    gap: 1px;
+    font-family: monospace;
+    font-size: 10.5px;
+  }
+  .vamap .region {
+    padding: 6px 10px;
+    background: var(--unmapped);
+    color: var(--text-dim);
+    border-radius: 3px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    align-items: center;
+    transition: all 0.3s;
+    position: relative;
+    overflow: hidden;
+  }
+  .vamap .region.mapped {
+    background: linear-gradient(90deg, var(--region-color, var(--accent)) 0%, rgba(0,0,0,0) 100%);
+    color: var(--text);
+    border-left: 3px solid var(--region-color, var(--accent));
+  }
+  .vamap .region.mapped.partial {
+    background: linear-gradient(90deg, var(--region-color, var(--accent)) 0%, rgba(0,0,0,0) 50%);
+  }
+  .vamap .region .region-name { font-weight: 600; }
+  .vamap .region .region-addr {
+    color: var(--text-dim);
+    font-size: 9.5px;
+  }
+  .vamap .region .partial-tag {
+    background: var(--warn);
+    color: var(--bg);
+    padding: 0 5px;
+    border-radius: 8px;
+    font-size: 9px;
+    margin-left: 6px;
+  }
+  .vamap .legend {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 10.5px;
+    line-height: 1.7;
+  }
+  .vamap .legend .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  /* Animation when stepping */
+  .pulse { animation: pulse 0.4s ease-out; }
+  @keyframes pulse {
+    0%   { transform: scale(1); }
+    50%  { transform: scale(1.02); }
+    100% { transform: scale(1); }
+  }
+
+  /* Footer hint */
+  footer {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex; gap: 16px;
+    flex-shrink: 0;
+  }
+  footer .kbd {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-family: monospace;
+    font-size: 10px;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RISC-V Sv39 页表构建过程 <span class="sub">_start → init 之前 · 🤖 由 Minimax3 生成</span></h1>
+  <div class="ctrls">
+    <span class="step-counter">Step <b id="curStep">1</b> / <span id="totalSteps">12</span></span>
+    <button id="btnPrev" title="上一步 (←)">← Prev</button>
+    <button id="btnNext" class="primary" title="下一步 (→)">Next →</button>
+    <button id="btnPlay" title="自动播放 / 暂停 (Space)">▶ Auto</button>
+    <button id="btnReset" title="回到起点 (R)">⟲ Reset</button>
+  </div>
+</header>
+
+<main>
+  <aside class="steps" id="stepList"></aside>
+  <section class="content">
+
+    <!-- top: step title + code -->
+    <div class="panel description">
+      <div class="desc-text">
+        <div class="title" id="stepTitle">—</div>
+        <div id="stepDesc">—</div>
+      </div>
+      <div class="code-pane" id="stepCode"></div>
+    </div>
+
+    <!-- middle: satp + cpu state -->
+    <div class="panel satp">
+      <div>
+        <h2>satp 寄存器 <span class="stage-badge" id="mmuState">MMU OFF</span></h2>
+        <div class="satp-reg" id="satpRegister"></div>
+      </div>
+      <div>
+        <h2>CPU / 状态</h2>
+        <dl class="cpu-state" id="cpuState"></dl>
+      </div>
+    </div>
+
+    <!-- bottom: page tables + VA map -->
+    <div class="row-bottom">
+      <div class="panel">
+        <h2>页表对象 (实时) <span class="stage-badge" id="ptOpsBadge">pt_ops=—</span></h2>
+        <div class="pgtable-grid" id="pageTables"></div>
+      </div>
+      <div class="panel">
+        <h2>Sv39 内核虚拟地址空间 <span class="stage-badge" id="vaCounter">0 个区域可达</span></h2>
+        <div class="vamap" id="vaMap"></div>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<footer>
+  <span>键盘: <span class="kbd">←</span> / <span class="kbd">→</span> 步进 · <span class="kbd">Space</span> 自动播放 · <span class="kbd">R</span> 重置 · <span class="kbd">1-9,0</span> 跳转</span>
+  <span style="margin-left:auto">基于 Linux 6.18 · <code>arch/riscv/kernel/head.S</code> + <code>arch/riscv/mm/init.c</code></span>
+</footer>
+
+<script>
+/* ============================================================
+ * Step Data Model
+ * 每个 step 描述：
+ *   - title/desc/code:  顶部说明 + 高亮源码片段
+ *   - satp: {mode, asid, ppn, mmu}
+ *   - cpu:  {pc_type, stvec, pt_ops, sp, gp, notes...}
+ *   - pgts: { trampoline:{}, early:{}, swapper:{}, fixmap_pmd:{}, fixmap_pte:{}, early_pmd:{}, trampoline_pmd:{} }
+ *           其中 active=true 表示当前 satp 指向它
+ *   - va:   { kernel: 'mapped'|'partial'|'unmapped', fixmap, pci, vmemmap, vmalloc, direct, modules }
+ * ============================================================ */
+
+const PAGE_OFFSET_L3   = "0xffffffd600000000";
+const KERNEL_LINK_ADDR = "0xffffffff80000000";
+const FIXADDR_START    = "0xffffffc4fea00000";
+const PA_KERNEL        = "0x80200000";  // typical bianbu/qemu start
+const PA_DTB           = "0xbfe00000";  // illustrative
+
+const VA_REGIONS = [
+  { id:'fixmap',  name:'fixmap',          range:'0xffffffc4fea00000 ~ 0xffffffc4feffffff',  size:'6 MB',   color:'var(--fixmap)' },
+  { id:'pci',     name:'PCI io',          range:'0xffffffc4ff000000 ~ 0xffffffc4ffffffff',  size:'16 MB',  color:'var(--pci)' },
+  { id:'vmemmap', name:'vmemmap',         range:'0xffffffc500000000 ~ 0xffffffc5ffffffff',  size:'4 GB',   color:'var(--vmemmap)' },
+  { id:'vmalloc', name:'vmalloc/ioremap', range:'0xffffffc600000000 ~ 0xffffffd5ffffffff',  size:'64 GB',  color:'var(--vmalloc)' },
+  { id:'direct',  name:'direct mapping',  range:'0xffffffd600000000 ~ 0xfffffff5ffffffff',  size:'128 GB', color:'var(--linear)' },
+  { id:'modules', name:'modules / BPF',   range:'0xffffffff00000000 ~ 0xffffffff7fffffff',  size:'2 GB',   color:'var(--modules)' },
+  { id:'kernel',  name:'kernel image',    range:'0xffffffff80000000 ~ 0xffffffffffffffff',  size:'2 GB',   color:'var(--kernel)' },
+];
+
+const EMPTY_PGTS = {
+  trampoline:    { entries: [] },
+  trampoline_pmd:{ entries: [] },
+  early:         { entries: [] },
+  early_pmd:     { entries: [] },
+  fixmap_pmd:    { entries: [] },
+  fixmap_pte:    { entries: [] },
+  swapper:       { entries: [] },
+};
+
+function pgt(o)   { return Object.assign({}, EMPTY_PGTS, o); }
+
+/* ---------- The 12 steps ---------- */
+const STEPS = [
+
+/* ===================== STAGE 1: MMU OFF ===================== */
+{
+  group: 'Stage 1 · MMU OFF',
+  title: 'Step 1 — _start 入口',
+  desc:  `SBI/M-mode 固件把控制权交给镜像首地址 <code>_start</code>。
+          跳过 image header，进入 <code>_start_kernel</code>。
+          <span class="key">satp = 0</span>，所有访问都是物理地址；BSS 还未清。`,
+  code: { file:'arch/riscv/kernel/head.S', lines:[
+    {n:21, t:'SYM_CODE_START(_start)'},
+    {n:36, t:'    j _start_kernel', hl:true},
+    {n:54, t:'    .dword _end - _start'},
+    {n:55, t:'    .dword __HEAD_FLAGS'},
+  ]},
+  satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
+  cpu:  { pc_type:'PA (物理)', stvec:'—（未设）', pt_ops:'—', sp:'—', gp:'—',
+          note:'刚进入 S-mode，无中断、无 FPU、无 VECTOR' },
+  pgts: pgt({}),
+  va: {},
+  ptOps: '—',
+},
+
+{
+  group: 'Stage 1 · MMU OFF',
+  title: 'Step 2 — _start_kernel：清 BSS、准备 C 环境',
+  desc:  `屏蔽中断、(M-mode) 设 PMP、hart-lottery 选出 boot CPU、清零 BSS 段；
+          挂上 <code>tp=init_task</code>，<code>sp=init_thread_union+THREAD_SIZE</code>；
+          <span class="key">a0=dtb_pa</span>；然后 <span class="key">call setup_vm</span>。
+          此时 <code>swapper_pg_dir / trampoline_pg_dir / fixmap_pte / fixmap_pmd</code> 都在 BSS 中被刚刚清成 0。`,
+  code: { file:'arch/riscv/kernel/head.S', lines:[
+    {n:291, t:'#ifndef CONFIG_XIP_KERNEL'},
+    {n:293, t:'    la a3, __bss_start'},
+    {n:294, t:'    la a4, __bss_stop'},
+    {n:296, t:'.Lclear_bss:', hl:true},
+    {n:297, t:'    REG_S zero, (a3)'},
+    {n:307, t:'    la tp, init_task'},
+    {n:308, t:'    la sp, init_thread_union + THREAD_SIZE'},
+    {n:321, t:'    call setup_vm', hl:true},
+  ]},
+  satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
+  cpu:  { pc_type:'PA (物理)', stvec:'.Lsecondary_park (兜底死循环)', pt_ops:'—',
+          sp:'init_stack', gp:'已加载', note:'BSS 已清；准备调 setup_vm' },
+  pgts: pgt({}),
+  va: {},
+  ptOps: '—',
+},
+
+{
+  group: 'Stage 1 · MMU OFF',
+  title: 'Step 3 — setup_vm：建 fixmap 中间链',
+  desc:  `先 <code>set_satp_mode()</code>（Sv39 路径会立刻 <code>disable_pgtable_l5/l4</code>，
+          satp_mode 落到 SATP_MODE_39，不真正写 satp）。然后 <code>pt_ops_set_early()</code> 把
+          alloc/get 全设为"返回静态 early_pmd 物理地址"。
+          接着在 <code>early_pg_dir</code> 中加 <span class="key">FIXADDR_PGD 槽 → fixmap_pmd</span>，
+          再在 <code>fixmap_pmd</code> 加 <span class="key">FIXADDR_PMD 项 → fixmap_pte</span>。
+          叶子 PTE 暂为全 0，先把指针链搭好。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:1192, t:'    pt_ops_set_early();'},
+    {n:1195, t:'    create_pgd_mapping(early_pg_dir, FIXADDR_START,', hl:true},
+    {n:1196, t:'                       fixmap_pgd_next, PGDIR_SIZE, PAGE_TABLE);'},
+    {n:1207, t:'    create_pmd_mapping(fixmap_pmd, FIXADDR_START,', hl:true},
+    {n:1208, t:'                       (uintptr_t)fixmap_pte, PMD_SIZE, PAGE_TABLE);'},
+  ]},
+  satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
+  cpu:  { pc_type:'PA (物理)', stvec:'.Lsecondary_park', pt_ops:'early (alloc=early_pmd PA, get=(void*)pa)',
+          sp:'init_stack', gp:'已加载', note:'pgtable_l4_enabled=false, pgtable_l5_enabled=false (Sv39)' },
+  pgts: pgt({
+    early: { active:false, entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table', isNew:true },
+    ]},
+    fixmap_pmd: { active:false, entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table', isNew:true },
+    ]},
+    fixmap_pte: { active:false, entries:[], note:'(全 0，等 __set_fixmap 填)' },
+  }),
+  va: {},
+  ptOps: 'early',
+},
+
+{
+  group: 'Stage 1 · MMU OFF',
+  title: 'Step 4 — setup_vm：建 trampoline_pg_dir',
+  desc:  `<span class="key">trampoline_pg_dir</span> 的目的是：MMU 打开瞬间，只需保证内核镜像那 2 MiB 既能 fetch 又能写。
+          所以只填 <b>1 个 PGD 槽 → trampoline_pmd</b>，再在 PMD 加 <b>1 个 2 MiB 叶子大页</b>，
+          把 <code>kernel_map.virt_addr</code> 映到 <code>kernel_map.phys_addr</code>，RWX。
+          注意：这是 PMD 级 leaf（pmd_leaf），所以没有 PTE 一级。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:1210, t:'    create_pgd_mapping(trampoline_pg_dir, kernel_map.virt_addr,', hl:true},
+    {n:1211, t:'                       trampoline_pgd_next, PGDIR_SIZE, PAGE_TABLE);'},
+    {n:1222, t:'    create_pmd_mapping(trampoline_pmd, kernel_map.virt_addr,', hl:true},
+    {n:1223, t:'                       kernel_map.phys_addr, PMD_SIZE, PAGE_KERNEL_EXEC);'},
+  ]},
+  satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
+  cpu:  { pc_type:'PA (物理)', stvec:'.Lsecondary_park', pt_ops:'early',
+          sp:'init_stack', gp:'已加载', note:'trampoline 只覆盖 kernel virt_addr 那 2 MiB' },
+  pgts: pgt({
+    early: { active:false, entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+    ]},
+    trampoline: { active:false, entries:[
+      { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table', isNew:true,
+        note:'对应 0xffffffff80000000 那 1GB' },
+    ]},
+    trampoline_pmd: { entries:[
+      { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX', isNew:true },
+    ]},
+    fixmap_pte: { entries:[], note:'(全 0)' },
+  }),
+  va: {},
+  ptOps: 'early',
+},
+
+{
+  group: 'Stage 1 · MMU OFF',
+  title: 'Step 5 — setup_vm：建 early_pg_dir 内核镜像映射',
+  desc:  `<code>create_kernel_page_table(early_pg_dir, true)</code>：
+          以 <span class="key">2 MiB 大页</span> 把整个 <code>[kernel_map.virt_addr, +size)</code> 全部映射进 early_pg_dir，
+          属性 <code>PAGE_KERNEL_EXEC</code>（early=true 暂用 RWX，后面 setup_vm_final 会精细化）。
+          所有 PMD 项写到同一份 <code>early_pmd</code>（<code>alloc_pmd_early</code> 强约束 BUG_ON 不跨 1 GiB）。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:1232, t:'    /* Setup early PGD covering entire kernel ... */'},
+    {n:1236, t:'    create_kernel_page_table(early_pg_dir, true);', hl:true},
+    {n:971,  t:'static void __init create_kernel_page_table(...)'},
+    {n:976,  t:'    for (va = kernel_map.virt_addr; va < end_va; va += PMD_SIZE)'},
+    {n:977,  t:'        create_pgd_mapping(pgdir, va, phys, PMD_SIZE, PAGE_KERNEL_EXEC);'},
+  ]},
+  satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
+  cpu:  { pc_type:'PA (物理)', stvec:'.Lsecondary_park', pt_ops:'early',
+          sp:'init_stack', gp:'已加载',
+          note:'early_pmd 同时被多条 PMD 项填满；属性暂时全 RWX' },
+  pgts: pgt({
+    early: { entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
+      { idx:'[kern_PGD]',    target:'→ early_pmd',  kind:'table', isNew:true },
+    ]},
+    early_pmd: { entries:[
+      { idx:'[kern_PMD+0]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX', isNew:true },
+      { idx:'[kern_PMD+1]', target:'PA +2MB',         leaf:true, prot:'2MB RWX', isNew:true },
+      { idx:'…',             target:'(整个内核镜像)', leaf:true, prot:'2MB RWX', isNew:true },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+    ]},
+    trampoline: { entries:[
+      { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table' },
+    ]},
+    trampoline_pmd: { entries:[
+      { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' },
+    ]},
+    fixmap_pte: { entries:[], note:'(全 0)' },
+  }),
+  va: {},
+  ptOps: 'early',
+},
+
+{
+  group: 'Stage 1 · MMU OFF',
+  title: 'Step 6 — setup_vm：FDT 进 fixmap + pt_ops_set_fixmap',
+  desc:  `<code>create_fdt_early_page_table(__fix_to_virt(FIX_FDT), dtb_pa)</code> 把 DTB 物理区域以两个 2MB 大页
+          直接写到 <code>fixmap_pmd</code>。
+          末尾 <code>pt_ops_set_fixmap()</code> 把 alloc/get 切到 <b>memblock + FIX_PMD 临时挂载</b>，
+          为 MMU 打开后还能动态分配新页表页做准备（要等线性映射好之前的过渡）。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:1004, t:'    create_pmd_mapping(fixmap_pmd, fix_fdt_va,', hl:true},
+    {n:1005, t:'                       pa, PMD_SIZE, PAGE_KERNEL);'},
+    {n:1006, t:'    create_pmd_mapping(fixmap_pmd, fix_fdt_va + PMD_SIZE,'},
+    {n:1007, t:'                       pa + PMD_SIZE, PMD_SIZE, PAGE_KERNEL);'},
+    {n:1271, t:'    pt_ops_set_fixmap();', hl:true},
+  ]},
+  satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
+  cpu:  { pc_type:'PA (物理)', stvec:'.Lsecondary_park',
+          pt_ops:'fixmap (alloc=memblock, get=经 FIX_PMD 临时挂载)',
+          sp:'init_stack', gp:'已加载',
+          note:'pt_ops 已经为 MMU 打开后准备好；但当前还在 MMU OFF' },
+  pgts: pgt({
+    early: { entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
+      { idx:'[kern_PGD]',    target:'→ early_pmd',  kind:'table' },
+    ]},
+    early_pmd: { entries:[
+      { idx:'[…]', target:`PA ${PA_KERNEL}+…`, leaf:true, prot:'2MB RWX', note:'整个 kernel' },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_PMD+0]', target:`PA ${PA_DTB}`, leaf:true, prot:'2MB RW', isNew:true },
+      { idx:'[FIX_FDT_PMD+1]', target:`PA ${PA_DTB}+2MB`, leaf:true, prot:'2MB RW', isNew:true },
+    ]},
+    trampoline: { entries:[
+      { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table' },
+    ]},
+    trampoline_pmd: { entries:[
+      { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' },
+    ]},
+    fixmap_pte: { entries:[], note:'(全 0)' },
+  }),
+  va: {},
+  ptOps: 'fixmap',
+},
+
+/* ===================== STAGE 2: MMU ON via trampoline ===================== */
+{
+  group: 'Stage 2 · 切 MMU',
+  title: 'Step 7 — relocate_enable_mmu ①：satp = trampoline_pg_dir',
+  desc:  `setup_vm 返回后 head.S 调 <code>relocate_enable_mmu(a0=early_pg_dir_PA)</code>：
+          ① 把返回地址 <code>ra</code> 加上 va_kernel_pa_offset，提前指向虚拟空间；
+          ② 把 <code>stvec</code> 指向写 satp 之后那条指令的 <b>虚拟地址</b>（取指失败就跳过去也是同一处）；
+          ③ <span class="key">csrw satp, trampoline | SATP_MODE_39</span>，<span class="key">sfence.vma</span>。
+          MMU 打开瞬间，只有 kernel 那 2 MiB 是可达的（PMD 大页 RWX）。`,
+  code: { file:'arch/riscv/kernel/head.S', lines:[
+    {n:84,  t:'    la a2, 1f'},
+    {n:85,  t:'    add a2, a2, a1'},
+    {n:86,  t:'    csrw CSR_TVEC, a2          # stvec → 虚拟地址 1:', hl:true},
+    {n:101, t:'    la a0, trampoline_pg_dir'},
+    {n:103, t:'    srl a0, a0, PAGE_SHIFT'},
+    {n:104, t:'    or  a0, a0, a1             # a0 = trampoline | SATP_MODE_39'},
+    {n:105, t:'    sfence.vma'},
+    {n:106, t:'    csrw CSR_SATP, a0          # ★ ① MMU ON', hl:true},
+    {n:108, t:'1:'},
+  ]},
+  satp: { mode:'8', asid:'0', ppn:'PFN(trampoline_pg_dir)', mmu:'ON' },
+  cpu:  { pc_type:'VA (虚拟，但 ra 已在虚空间)', stvec:'1: 的虚拟地址',
+          pt_ops:'fixmap', sp:'init_stack (PA, 但映射使 VA==PA)',
+          gp:'(待 reload)', note:'仅 kernel_map.virt_addr 起 2 MiB 可达' },
+  pgts: pgt({
+    early: { entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
+      { idx:'[kern_PGD]',    target:'→ early_pmd',  kind:'table' },
+    ]},
+    early_pmd: { entries:[
+      { idx:'[…]', target:`PA ${PA_KERNEL}+…`, leaf:true, prot:'2MB RWX' },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_PMD+0]', target:`PA ${PA_DTB}`, leaf:true, prot:'2MB RW' },
+      { idx:'[FIX_FDT_PMD+1]', target:'+2MB', leaf:true, prot:'2MB RW' },
+    ]},
+    trampoline: { active:true, entries:[
+      { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table', note:'★ satp 指向我' },
+    ]},
+    trampoline_pmd: { entries:[
+      { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' },
+    ]},
+    fixmap_pte: { entries:[], note:'(全 0)' },
+  }),
+  va: { kernel:'partial' },
+  ptOps: 'fixmap',
+},
+
+{
+  group: 'Stage 2 · 切 MMU',
+  title: 'Step 8 — relocate_enable_mmu ②：satp = early_pg_dir',
+  desc:  `把 stvec 暂时改回 <code>.Lsecondary_park</code>、<code>load_global_pointer</code> 重载 gp，
+          然后 <span class="key">csrw satp, early_pg_dir | SATP_MODE_39</span> + <code>sfence.vma</code>。
+          现在整个内核镜像、fixmap 子树（含 FDT 2MB 大页）都可见。
+          <code>ret</code> 回到 head.S 的 <code>call setup_vm</code> 之后，但因为前面改写了 ra，<b>返回到虚拟地址</b>。`,
+  code: { file:'arch/riscv/kernel/head.S', lines:[
+    {n:110, t:'    la a0, .Lsecondary_park'},
+    {n:111, t:'    csrw CSR_TVEC, a0          # 暂时把 stvec 改回兜底'},
+    {n:114, t:'    load_global_pointer        # 重载 gp（现在 gp 是 VA）'},
+    {n:122, t:'    csrw CSR_SATP, a2          # ★ ② satp = early_pg_dir | Sv39', hl:true},
+    {n:123, t:'    sfence.vma'},
+    {n:125, t:'    ret                        # 返回（已经在 VA 空间）'},
+  ]},
+  satp: { mode:'8', asid:'0', ppn:'PFN(early_pg_dir)', mmu:'ON' },
+  cpu:  { pc_type:'VA (虚拟)', stvec:'.Lsecondary_park (虚拟)',
+          pt_ops:'fixmap', sp:'init_stack', gp:'重载 (虚拟)',
+          note:'kernel image (RWX) + fixmap 子树全可见' },
+  pgts: pgt({
+    early: { active:true, entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table', note:'★ satp 指向我' },
+      { idx:'[kern_PGD]',    target:'→ early_pmd',  kind:'table' },
+    ]},
+    early_pmd: { entries:[
+      { idx:'[…]', target:`PA ${PA_KERNEL}+…`, leaf:true, prot:'2MB RWX (整 kernel)' },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_PMD+0]', target:`PA ${PA_DTB}`, leaf:true, prot:'2MB RW' },
+      { idx:'[FIX_FDT_PMD+1]', target:'+2MB', leaf:true, prot:'2MB RW' },
+    ]},
+    trampoline: { entries:[
+      { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table',
+        note:'保留供 secondary CPU 复用' },
+    ]},
+    trampoline_pmd: { entries:[
+      { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' },
+    ]},
+    fixmap_pte: { entries:[], note:'(仍全 0；以后由 __set_fixmap 填)' },
+  }),
+  va: { kernel:'mapped', fixmap:'partial' },
+  ptOps: 'fixmap',
+},
+
+/* ===================== STAGE 3: C kernel under early_pg_dir ===================== */
+{
+  group: 'Stage 3 · early_pg_dir 上运行 C',
+  title: 'Step 9 — start_kernel → setup_arch → setup_bootmem',
+  desc:  `<code>setup_trap_vector</code> 把 stvec 指向 <code>handle_exception</code>；走完 <code>kasan_early_init / soc_early_init</code>
+          后 <code>tail start_kernel</code>。在 <code>paging_init → setup_bootmem</code> 中第一次
+          算出 <span class="key">va_pa_offset = PAGE_OFFSET - phys_ram_base</span>（之前是 0），
+          这之后 <code>__va()/__pa()</code> 才能用来走线性映射。
+          memblock 初始化、reserve 内核/initrd/FDT。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:266, t:'    if (IS_ENABLED(CONFIG_64BIT) && IS_ENABLED(CONFIG_MMU))'},
+    {n:267, t:'        kernel_map.va_pa_offset = PAGE_OFFSET - phys_ram_base;', hl:true},
+    {n:300, t:'    min_low_pfn = PFN_UP(phys_ram_base);'},
+    {n:301, t:'    max_low_pfn = max_pfn = PFN_DOWN(phys_ram_end);'},
+  ]},
+  satp: { mode:'8', asid:'0', ppn:'PFN(early_pg_dir)', mmu:'ON' },
+  cpu:  { pc_type:'VA', stvec:'handle_exception',
+          pt_ops:'fixmap', sp:'init_stack (VA)', gp:'VA',
+          note:'va_pa_offset 已设；__va/__pa 可用于线性映射' },
+  pgts: pgt({
+    early: { active:true, entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
+      { idx:'[kern_PGD]',    target:'→ early_pmd',  kind:'table' },
+    ]},
+    early_pmd: { entries:[ { idx:'[…]', target:'(整 kernel)', leaf:true, prot:'2MB RWX' } ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_*]',   target:'FDT 2MB ×2', leaf:true, prot:'2MB RW' },
+    ]},
+    trampoline:     { entries:[ { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table' } ]},
+    trampoline_pmd: { entries:[ { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' } ]},
+    fixmap_pte:     { entries:[], note:'__set_fixmap 已可填项（如 earlycon）' },
+  }),
+  va: { kernel:'mapped', fixmap:'partial' },
+  ptOps: 'fixmap',
+},
+
+{
+  group: 'Stage 3 · early_pg_dir 上运行 C',
+  title: 'Step 10 — setup_vm_final 构建 swapper_pg_dir',
+  desc:  `仍在 satp = early_pg_dir。三件事写进 <code>swapper_pg_dir</code>：
+          <b>(a)</b> 1 个 PGD 项指向 <code>fixmap_pmd</code> 物理地址，<b>共享同一份 fixmap 子树</b>；
+          <b>(b)</b> <code>create_linear_mapping_page_table</code> 把每段 memblock 内存以 1 GiB / 2 MiB 大页
+          映射进 direct mapping 区（属性按 <code>pgprot_from_va</code> 取）；
+          <b>(c)</b> <code>create_kernel_page_table(swapper_pg_dir, false)</code>
+          把内核镜像重新精细映射（text=RX, rodata=R, data=RW）。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:1359, t:'    create_pgd_mapping(swapper_pg_dir, FIXADDR_START,', hl:true},
+    {n:1360, t:'                       __pa_symbol(fixmap_pgd_next),'},
+    {n:1361, t:'                       PGDIR_SIZE, PAGE_TABLE);'},
+    {n:1364, t:'    create_linear_mapping_page_table();', hl:true},
+    {n:1367, t:'    if (IS_ENABLED(CONFIG_64BIT))'},
+    {n:1368, t:'        create_kernel_page_table(swapper_pg_dir, false);', hl:true},
+  ]},
+  satp: { mode:'8', asid:'0', ppn:'PFN(early_pg_dir)', mmu:'ON' },
+  cpu:  { pc_type:'VA', stvec:'handle_exception',
+          pt_ops:'fixmap', sp:'init_stack', gp:'VA',
+          note:'swapper 已构建好，但还没切过去；早期 pt_ops 仍在生效' },
+  pgts: pgt({
+    early: { active:true, entries:[
+      { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
+      { idx:'[kern_PGD]',    target:'→ early_pmd',  kind:'table' },
+    ]},
+    early_pmd: { entries:[ { idx:'[…]', target:'(整 kernel)', leaf:true, prot:'2MB RWX' } ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_*]', target:'FDT', leaf:true, prot:'2MB RW' },
+    ]},
+    swapper: { active:false, entries:[
+      { idx:'[FIXADDR_PGD]',   target:'→ fixmap_pmd', kind:'table', isNew:true,
+        note:'与 early 共享 fixmap_pmd' },
+      { idx:'[direct_map_*]',  target:'→ 多级 / 1GB 大页', kind:'table', isNew:true,
+        note:'整个 RAM 线性映射' },
+      { idx:'[kern_PGD]',      target:'→ new PMD', kind:'table', isNew:true,
+        note:'内核镜像，text/rodata/data 分段属性' },
+    ]},
+    trampoline:     { entries:[ { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table' } ]},
+    trampoline_pmd: { entries:[ { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' } ]},
+    fixmap_pte:     { entries:[] },
+  }),
+  va: { kernel:'mapped', fixmap:'partial' },
+  ptOps: 'fixmap',
+},
+
+/* ===================== STAGE 4: swapper_pg_dir ===================== */
+{
+  group: 'Stage 4 · swapper_pg_dir',
+  title: 'Step 11 — setup_vm_final ③：satp = swapper_pg_dir',
+  desc:  `<code>clear_fixmap(FIX_PTE/PMD/PUD/P4D)</code> 收尾，
+          然后 <span class="key">csr_write(CSR_SATP, PFN(swapper_pg_dir) | satp_mode)</span> + <code>local_flush_tlb_all()</code>。
+          这是 <b>第三次也是最后一次写 satp</b>。从此 <code>early_pg_dir / early_pmd / early_pud / early_p4d</code>
+          不再被 satp 引用，会随 <code>__init</code> 段释放。
+          <code>pt_ops_set_late()</code> 把分配切到 <b>buddy + __va(pa)</b>，因为线性映射已就绪。`,
+  code: { file:'arch/riscv/mm/init.c', lines:[
+    {n:1375, t:'    clear_fixmap(FIX_PTE);'},
+    {n:1376, t:'    clear_fixmap(FIX_PMD);'},
+    {n:1381, t:'    csr_write(CSR_SATP,', hl:true},
+    {n:1381, t:'              PFN_DOWN(__pa_symbol(swapper_pg_dir)) | satp_mode);'},
+    {n:1382, t:'    local_flush_tlb_all();'},
+    {n:1384, t:'    pt_ops_set_late();', hl:true},
+  ]},
+  satp: { mode:'8', asid:'0', ppn:'PFN(swapper_pg_dir)', mmu:'ON' },
+  cpu:  { pc_type:'VA', stvec:'handle_exception',
+          pt_ops:'late (alloc=pagetable_alloc, get=__va(pa))',
+          sp:'init_stack', gp:'VA',
+          note:'init_mm.pgd = swapper_pg_dir；以后所有进程都共享内核空间这部分' },
+  pgts: pgt({
+    swapper: { active:true, entries:[
+      { idx:'[FIXADDR_PGD]',   target:'→ fixmap_pmd', kind:'table', note:'★ satp 指向我' },
+      { idx:'[direct_map_*]',  target:'→ 多级 / 1GB 大页', kind:'table', note:'整个 RAM 线性映射' },
+      { idx:'[kern_PGD]',      target:'→ new PMD', kind:'table', note:'内核镜像 RWX 分段' },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_*]', target:'FDT', leaf:true, prot:'2MB RW' },
+    ]},
+    early: { entries:[], note:'(已脱离 satp，__init 段待释放)', isDead:true },
+    early_pmd: { entries:[], note:'(同上)', isDead:true },
+    trampoline:     { entries:[ { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table' } ]},
+    trampoline_pmd: { entries:[ { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' } ]},
+    fixmap_pte:     { entries:[] },
+  }),
+  va: { kernel:'mapped', fixmap:'mapped', pci:'mapped', vmemmap:'partial',
+        vmalloc:'partial', direct:'mapped', modules:'partial' },
+  ptOps: 'late',
+},
+
+{
+  group: 'Stage 4 · swapper_pg_dir',
+  title: 'Step 12 — 后续：rest_init → kernel_init (PID 1)',
+  desc:  `<code>mm_core_init → pgtable_cache_init</code> 把 vmalloc / modules / vmemmap 区间的<b>中间页表</b>预分配好，
+          保证以后 fork 的进程在拷贝 PGD 时能共享。
+          <code>mark_readonly()</code> 把 rodata 与其线性映射 alias 设为只读。
+          <code>sparse_init</code> 真正填 vmemmap PFN 范围。
+          最终 <code>rest_init()</code> 派生 PID 1 进入 <code>kernel_init</code> → 用户态 init。
+          至此 <b>satp 在内核态稳定为 swapper</b>；上下文切换到用户进程时只换 satp 的 PPN，<b>SATP_MODE_39 一直保持</b>。`,
+  code: { file:'init/main.c (主线)', lines:[
+    {n: 0, t:'mm_core_init()'},
+    {n: 0, t:'  └ pgtable_cache_init()  // 预分配 vmalloc/modules/vmemmap 中间表'},
+    {n: 0, t:'mark_readonly()'},
+    {n: 0, t:'  └ mark_rodata_ro()'},
+    {n: 0, t:'sparse_init()  // vmemmap PFN 真填'},
+    {n: 0, t:'rest_init()'},
+    {n: 0, t:'  └ kernel_init  (PID 1)', hl:true},
+    {n: 0, t:'      └ kernel_init_freeable → run_init_process("/sbin/init")'},
+  ]},
+  satp: { mode:'8', asid:'0', ppn:'PFN(swapper_pg_dir)', mmu:'ON' },
+  cpu:  { pc_type:'VA', stvec:'handle_exception',
+          pt_ops:'late', sp:'init_stack → kernel_init stack', gp:'VA',
+          note:'init 进程派生后会借自己的 mm.pgd 切 satp，但内核部分一直共享 swapper' },
+  pgts: pgt({
+    swapper: { active:true, entries:[
+      { idx:'[FIXADDR_PGD]',   target:'→ fixmap_pmd', kind:'table' },
+      { idx:'[direct_map_*]',  target:'→ 多级', kind:'table' },
+      { idx:'[vmalloc_*]',     target:'→ 预分配的 PMD/PUD', kind:'table', isNew:true },
+      { idx:'[modules_*]',     target:'→ 预分配的 PMD', kind:'table', isNew:true },
+      { idx:'[vmemmap_*]',     target:'→ 已 sparse 填', kind:'table', isNew:true },
+      { idx:'[kern_PGD]',      target:'→ kernel PMD (RWX 分段)', kind:'table' },
+    ]},
+    fixmap_pmd: { entries:[
+      { idx:'[FIXADDR_PMD]', target:'→ fixmap_pte', kind:'table' },
+      { idx:'[FIX_FDT_*]',   target:'FDT', leaf:true, prot:'2MB RW' },
+    ]},
+    early: { entries:[], note:'(__init 已释放)', isDead:true },
+    early_pmd: { entries:[], note:'(已释放)', isDead:true },
+    trampoline:     { entries:[ { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table',
+                                  note:'仅 secondary CPU 启动短暂复用' } ]},
+    trampoline_pmd: { entries:[ { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' } ]},
+    fixmap_pte:     { entries:[] },
+  }),
+  va: { kernel:'mapped', fixmap:'mapped', pci:'mapped', vmemmap:'mapped',
+        vmalloc:'mapped', direct:'mapped', modules:'mapped' },
+  ptOps: 'late',
+},
+];
+
+/* ============================================================
+ * Renderers
+ * ============================================================ */
+const $ = (id) => document.getElementById(id);
+
+let curStep = 0;
+let autoPlayTimer = null;
+
+function render() {
+  const s = STEPS[curStep];
+  $('curStep').textContent = curStep + 1;
+  $('totalSteps').textContent = STEPS.length;
+
+  // step list highlight
+  document.querySelectorAll('#stepList .step-item').forEach((el, i) => {
+    el.classList.toggle('active', i === curStep);
+  });
+  // scroll active into view
+  const active = document.querySelector('#stepList .step-item.active');
+  if (active) active.scrollIntoView({block:'nearest', behavior:'smooth'});
+
+  // description
+  $('stepTitle').innerHTML = s.title;
+  $('stepDesc').innerHTML = s.desc;
+
+  // code
+  $('stepCode').innerHTML = renderCode(s.code);
+
+  // satp register
+  renderSatp(s.satp);
+  $('mmuState').textContent = `MMU ${s.satp.mmu}`;
+  $('mmuState').style.color = s.satp.mmu === 'ON' ? 'var(--accent)' : 'var(--text-dim)';
+
+  // cpu state
+  renderCpu(s.cpu);
+
+  // pt_ops badge
+  $('ptOpsBadge').textContent = `pt_ops = ${s.ptOps}`;
+
+  // page tables
+  renderPageTables(s.pgts);
+
+  // VA map
+  renderVaMap(s.va);
+
+  // buttons
+  $('btnPrev').disabled = curStep === 0;
+  $('btnNext').disabled = curStep === STEPS.length - 1;
+
+  // pulse animation
+  document.querySelectorAll('.panel').forEach(p => {
+    p.classList.remove('pulse');
+    void p.offsetWidth;  // restart anim
+    p.classList.add('pulse');
+  });
+}
+
+function renderCode(code) {
+  if (!code) return '';
+  const lines = code.lines.map(l => {
+    const cls = l.hl ? 'hl' : '';
+    const num = l.n ? String(l.n).padStart(4) : '   ·';
+    return `<span class="${cls}"><span class="line-num">${num}</span>${escapeHtml(l.t)}</span>`;
+  }).join('\n');
+  return `<div class="file">// ${escapeHtml(code.file)}</div>${lines}`;
+}
+
+function renderSatp(satp) {
+  const isZero = satp.mode === '0';
+  $('satpRegister').innerHTML = `
+    <div class="field ${isZero?'zero':'changed'}">
+      <span class="label">MODE [63:60]</span>
+      <span class="val">${satp.mode}${satp.mode === '8' ? ' (Sv39)' : satp.mode === '0' ? ' (Bare)' : ''}</span>
+    </div>
+    <span class="sep">·</span>
+    <div class="field ${isZero?'zero':''}">
+      <span class="label">ASID [59:44]</span>
+      <span class="val">${satp.asid}</span>
+    </div>
+    <span class="sep">·</span>
+    <div class="field ${isZero?'zero':'changed'}">
+      <span class="label">PPN [43:0]</span>
+      <span class="val">${satp.ppn}</span>
+    </div>
+  `;
+}
+
+function renderCpu(cpu) {
+  const dl = $('cpuState');
+  const rows = [
+    ['PC',     cpu.pc_type],
+    ['stvec',  cpu.stvec],
+    ['pt_ops', cpu.pt_ops],
+    ['sp',     cpu.sp],
+    ['gp',     cpu.gp],
+    ['note',   cpu.note],
+  ];
+  dl.innerHTML = rows.map(([k,v]) => {
+    const valHtml = v.includes('★') || v.includes('已设') || v.includes('VA') && k === 'PC'
+      ? `<span class="on">${escapeHtml(v)}</span>`
+      : v === '—' || v.includes('未') || v.includes('OFF')
+      ? `<span class="off">${escapeHtml(v)}</span>`
+      : escapeHtml(v);
+    return `<dt>${k}</dt><dd>${valHtml}</dd>`;
+  }).join('');
+}
+
+function renderPageTables(pgts) {
+  const container = $('pageTables');
+  // we render 3 main pgds + their middle tables in a 3-column grid
+  const layout = [
+    { key:'trampoline',    title:'trampoline_pg_dir', tag:'PGD', children:'trampoline_pmd' },
+    { key:'early',         title:'early_pg_dir',      tag:'PGD', children:'early_pmd', extra:'fixmap_pmd' },
+    { key:'swapper',       title:'swapper_pg_dir',    tag:'PGD' },
+  ];
+  container.innerHTML = layout.map(L => renderOnePgt(L, pgts)).join('');
+}
+
+function renderOnePgt(L, pgts) {
+  const root = pgts[L.key] || { entries: [] };
+  const isActive = !!root.active;
+  const isEmpty  = root.entries.length === 0;
+  const isDead   = !!root.isDead;
+
+  let html = `<div class="pgtable ${isActive?'active':''} ${isEmpty?'empty':''}">
+    <h3>${L.title} <span class="tag">${isActive ? '★ satp' : isDead ? 'dead' : L.tag}</span></h3>`;
+
+  // root entries
+  html += `<div class="level"><div class="lvl-name">PGD entries</div>`;
+  if (isEmpty) {
+    html += `<div class="placeholder">${root.note || '(空)'}</div>`;
+  } else {
+    html += root.entries.map(e => renderEntry(e)).join('');
+  }
+  html += `</div>`;
+
+  // children: PMD-level
+  if (L.children && pgts[L.children]) {
+    const c = pgts[L.children];
+    html += `<div class="level"><div class="lvl-name">↓ ${L.children}</div>`;
+    if (c.entries.length === 0) {
+      html += `<div class="placeholder">${c.note || '(空)'}</div>`;
+    } else {
+      html += c.entries.map(e => renderEntry(e)).join('');
+    }
+    html += `</div>`;
+  }
+
+  // for early: also show fixmap chain since early references fixmap_pmd
+  if (L.extra && pgts[L.extra]) {
+    const c = pgts[L.extra];
+    html += `<div class="level"><div class="lvl-name">↓ ${L.extra} (共享)</div>`;
+    if (c.entries.length === 0) {
+      html += `<div class="placeholder">${c.note || '(空)'}</div>`;
+    } else {
+      html += c.entries.map(e => renderEntry(e)).join('');
+    }
+    html += `</div>`;
+  }
+
+  // swapper also shares fixmap_pmd once it has the fixmap PGD entry
+  if (L.key === 'swapper' && root.entries.some(e => e.idx && e.idx.includes('FIXADDR_PGD'))) {
+    const c = pgts.fixmap_pmd || { entries: [] };
+    html += `<div class="level"><div class="lvl-name">↓ fixmap_pmd (共享)</div>`;
+    if (c.entries.length === 0) {
+      html += `<div class="placeholder">(空)</div>`;
+    } else {
+      html += c.entries.map(e => renderEntry(e)).join('');
+    }
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+function renderEntry(e) {
+  const cls = e.isNew ? 'new' : '';
+  let line = `<div class="entry ${cls}"><span class="idx">${e.idx}</span><span class="arrow">${e.leaf?'⇒':'→'}</span>${escapeHtml(e.target)}`;
+  if (e.prot) line += ` <span class="leaf-prot">[${escapeHtml(e.prot)}]</span>`;
+  line += `</div>`;
+  if (e.note) {
+    line += `<div class="placeholder" style="padding-left:14px">${escapeHtml(e.note)}</div>`;
+  }
+  return line;
+}
+
+function renderVaMap(va) {
+  const container = $('vaMap');
+  let mapped = 0;
+  const items = VA_REGIONS.map(r => {
+    const state = va[r.id] || 'unmapped';
+    if (state === 'mapped') mapped++;
+    const cls = state === 'mapped' ? 'mapped' : state === 'partial' ? 'mapped partial' : '';
+    const tag = state === 'partial' ? '<span class="partial-tag">partial</span>' : '';
+    return `<div class="region ${cls}" style="--region-color:${r.color}">
+      <div>
+        <div class="region-name">${r.name}${tag}</div>
+        <div class="region-addr">${r.range}</div>
+      </div>
+      <div class="region-addr">${r.size}</div>
+    </div>`;
+  }).join('');
+  container.innerHTML = items + `
+    <div class="legend">
+      <div><span class="swatch" style="background:var(--accent)"></span>实线 = 整段可达
+           &nbsp;&nbsp;<span class="swatch" style="background:var(--warn)"></span>partial = 部分可达 (如只有 kernel 那 2MB 或 fixmap 中已填的几页)</div>
+      <div><span class="swatch" style="background:var(--unmapped)"></span>灰 = 该阶段尚未映射 (访问会 page fault)</div>
+    </div>`;
+
+  $('vaCounter').textContent = `${mapped} 区整段可达 · ${Object.values(va).filter(v=>v==='partial').length} 区部分可达`;
+}
+
+function renderStepList() {
+  let html = '';
+  let lastGroup = '';
+  STEPS.forEach((s, i) => {
+    if (s.group !== lastGroup) {
+      html += `<div class="group-label">${escapeHtml(s.group)}</div>`;
+      lastGroup = s.group;
+    }
+    const t = s.title.replace(/^Step \d+ — /, '');
+    html += `<div class="step-item" data-idx="${i}">
+      <span class="num">${String(i+1).padStart(2,'0')}.</span>${escapeHtml(t)}
+    </div>`;
+  });
+  $('stepList').innerHTML = html;
+  document.querySelectorAll('#stepList .step-item').forEach(el => {
+    el.addEventListener('click', () => {
+      curStep = parseInt(el.dataset.idx);
+      render();
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  })[c]);
+}
+
+/* ---------- Controls ---------- */
+$('btnPrev').onclick  = () => { if (curStep > 0) { curStep--; render(); } };
+$('btnNext').onclick  = () => { if (curStep < STEPS.length-1) { curStep++; render(); } };
+$('btnReset').onclick = () => { curStep = 0; stopAutoPlay(); render(); };
+$('btnPlay').onclick  = () => {
+  if (autoPlayTimer) { stopAutoPlay(); }
+  else { startAutoPlay(); }
+};
+
+function startAutoPlay() {
+  $('btnPlay').textContent = '⏸ Pause';
+  $('btnPlay').classList.add('primary');
+  autoPlayTimer = setInterval(() => {
+    if (curStep < STEPS.length - 1) {
+      curStep++; render();
+    } else {
+      stopAutoPlay();
+    }
+  }, 3500);
+}
+function stopAutoPlay() {
+  if (autoPlayTimer) clearInterval(autoPlayTimer);
+  autoPlayTimer = null;
+  $('btnPlay').textContent = '▶ Auto';
+  $('btnPlay').classList.remove('primary');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft')  { $('btnPrev').click(); }
+  if (e.key === 'ArrowRight') { $('btnNext').click(); }
+  if (e.key === ' ')          { e.preventDefault(); $('btnPlay').click(); }
+  if (e.key === 'r' || e.key === 'R') { $('btnReset').click(); }
+  if (/^[0-9]$/.test(e.key))  {
+    const idx = e.key === '0' ? 9 : parseInt(e.key) - 1;
+    if (idx < STEPS.length) { curStep = idx; render(); }
+  }
+});
+
+/* ---------- Boot ---------- */
+renderStepList();
+render();
+</script>
+</body>
+</html>
