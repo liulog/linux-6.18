@@ -92,6 +92,10 @@
     border-left: 3px solid transparent;
     font-size: 13px;
     transition: background 0.15s;
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   aside.steps .step-item:hover { background: var(--panel-2); }
   aside.steps .step-item.active {
@@ -99,12 +103,38 @@
     border-left-color: var(--accent);
     color: var(--accent);
   }
-  aside.steps .step-item .num {
-    font-family: monospace;
-    color: var(--text-dim);
-    margin-right: 6px;
+  /* 写 satp 的关键步骤：左侧加 ★ 徽标，整行以 warn 色高亮 */
+  aside.steps .step-item.satp-write {
+    background: rgba(255, 166, 87, 0.08);
+    border-left-color: var(--warn);
+    color: var(--warn);
+    font-weight: 600;
   }
-  aside.steps .step-item.active .num { color: var(--accent); }
+  aside.steps .step-item.satp-write::before {
+    content: '★';
+    color: var(--warn);
+    font-size: 14px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  aside.steps .step-item.satp-write.active {
+    background: rgba(255, 166, 87, 0.22);
+    border-left-color: var(--warn);
+    color: var(--warn);
+    box-shadow: inset 0 0 0 1px rgba(255, 166, 87, 0.4);
+  }
+  aside.steps .step-item .step-title {
+    flex: 1;
+  }
+  aside.steps .step-item.satp-write .satp-tag {
+    background: var(--warn);
+    color: var(--bg);
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    font-family: monospace;
+    margin-left: 4px;
+  }
   aside.steps .group-label {
     padding: 8px 16px 4px;
     color: var(--text-dim);
@@ -452,7 +482,7 @@
 <body>
 
 <header>
-  <h1>RISC-V Sv39 页表构建过程 <span class="sub">_start → init 之前 · 🤖 由 Minimax3 生成</span></h1>
+  <h1>RISC-V Sv39 页表构建过程 <span class="sub">_start → init 之前 · S-mode · 🤖 由 Minimax3 生成</span></h1>
   <div class="ctrls">
     <span class="step-counter">Step <b id="curStep">1</b> / <span id="totalSteps">12</span></span>
     <button id="btnPrev" title="上一步 (←)">← Prev</button>
@@ -554,7 +584,8 @@ const STEPS = [
 {
   group: 'Stage 1 · MMU OFF',
   title: 'Step 1 — _start 入口',
-  desc:  `SBI/M-mode 固件把控制权交给镜像首地址 <code>_start</code>。
+  desc:  `OpenSBI (M-mode 固件) 以 <b>S-mode</b> 把控制权交给镜像首地址 <code>_start</code>。
+          SBI 约定 <code>a0=boot hartid</code>, <code>a1=dtb_pa</code>。
           跳过 image header，进入 <code>_start_kernel</code>。
           <span class="key">satp = 0</span>，所有访问都是物理地址；BSS 还未清。`,
   code: { file:'arch/riscv/kernel/head.S', lines:[
@@ -574,7 +605,8 @@ const STEPS = [
 {
   group: 'Stage 1 · MMU OFF',
   title: 'Step 2 — _start_kernel：清 BSS、准备 C 环境',
-  desc:  `屏蔽中断、(M-mode) 设 PMP、hart-lottery 选出 boot CPU、清零 BSS 段；
+  desc:  `屏蔽中断、开放 S-mode 访问 <code>time</code> CSR (<code>SCOUNTEREN</code>)、
+          hart-lottery 选出 boot CPU、清零 BSS 段；
           挂上 <code>tp=init_task</code>，<code>sp=init_thread_union+THREAD_SIZE</code>；
           <span class="key">a0=dtb_pa</span>；然后 <span class="key">call setup_vm</span>。
           此时 <code>swapper_pg_dir / trampoline_pg_dir / fixmap_pte / fixmap_pmd</code> 都在 BSS 中被刚刚清成 0。`,
@@ -590,7 +622,8 @@ const STEPS = [
   ]},
   satp: { mode:'0', asid:'0', ppn:'0', mmu:'OFF' },
   cpu:  { pc_type:'PA (物理)', stvec:'.Lsecondary_park (兜底死循环)', pt_ops:'—',
-          sp:'init_stack', gp:'已加载', note:'BSS 已清；准备调 setup_vm' },
+          sp:'init_stack 的 PA (PC-relative la 算的)', gp:'已加载 (PA)',
+          note:'BSS 已清；准备调 setup_vm' },
   pgts: pgt({}),
   va: {},
   ptOps: '—',
@@ -631,10 +664,13 @@ const STEPS = [
 {
   group: 'Stage 1 · MMU OFF',
   title: 'Step 4 — setup_vm：建 trampoline_pg_dir',
-  desc:  `<span class="key">trampoline_pg_dir</span> 的目的是：MMU 打开瞬间，只需保证内核镜像那 2 MiB 既能 fetch 又能写。
-          所以只填 <b>1 个 PGD 槽 → trampoline_pmd</b>，再在 PMD 加 <b>1 个 2 MiB 叶子大页</b>，
-          把 <code>kernel_map.virt_addr</code> 映到 <code>kernel_map.phys_addr</code>，RWX。
-          注意：这是 PMD 级 leaf（pmd_leaf），所以没有 PTE 一级。`,
+  desc:  `<span class="key">trampoline_pg_dir</span> 是 MMU 第一次切换时的"最小映射表"：
+          只填 <b>1 个 PGD 槽 → trampoline_pmd</b>，再在 PMD 加 <b>1 个 2 MiB 叶子大页</b>，
+          把 <code>kernel_map.virt_addr</code> (≈ <code>0xffffffff80000000</code>)
+          映到 <code>kernel_map.phys_addr</code> (内核加载 PA，如 <code>0x80200000</code>)，RWX。
+          这是 PMD 级 leaf（<code>pmd_leaf</code>），所以没有 PTE 一级。
+          <span class="key">⚠️ 注意是 VA → PA 高地址映射，<b>不是 identity mapping</b></span>。
+          Linux RISC-V 不靠 VA==PA 跨过 MMU 启用的瞬间，而是用 §Step 7 的 stvec trick。`,
   code: { file:'arch/riscv/mm/init.c', lines:[
     {n:1210, t:'    create_pgd_mapping(trampoline_pg_dir, kernel_map.virt_addr,', hl:true},
     {n:1211, t:'                       trampoline_pgd_next, PGDIR_SIZE, PAGE_TABLE);'},
@@ -755,26 +791,40 @@ const STEPS = [
 {
   group: 'Stage 2 · 切 MMU',
   title: 'Step 7 — relocate_enable_mmu ①：satp = trampoline_pg_dir',
-  desc:  `setup_vm 返回后 head.S 调 <code>relocate_enable_mmu(a0=early_pg_dir_PA)</code>：
-          ① 把返回地址 <code>ra</code> 加上 va_kernel_pa_offset，提前指向虚拟空间；
-          ② 把 <code>stvec</code> 指向写 satp 之后那条指令的 <b>虚拟地址</b>（取指失败就跳过去也是同一处）；
-          ③ <span class="key">csrw satp, trampoline | SATP_MODE_39</span>，<span class="key">sfence.vma</span>。
-          MMU 打开瞬间，只有 kernel 那 2 MiB 是可达的（PMD 大页 RWX）。`,
+  desc:  `setup_vm 返回后 head.S 调 <code>relocate_enable_mmu(a0=early_pg_dir_PA)</code>，
+          关键三步：
+          ① 把返回地址 <code>ra</code> 加上 va_kernel_pa_offset，让 ret 时跳到虚拟空间；
+          ② <b>把 stvec 提前指向写 satp 之后那条指令的 VA</b>（这是整段 bringup 最巧妙的设计）；
+          ③ <span class="key">csrw satp, trampoline | SATP_MODE_39</span> + <span class="key">sfence.vma</span>。
+          <br><br>
+          <b>写完 satp 那一瞬间</b>：PC 寄存器的数值 <b>不会变</b>（仍是 csrw 之后那条 PA），
+          但 MMU 现在把它当 VA 翻译。trampoline 只在
+          <code>0xffffffff80...</code> 那一支有项，根本没有低地址 PA 这种 VA →
+          <b>取指必然触发 instruction page fault</b> → CPU 跳到 stvec → 跳到 <code>1:</code> 的 VA →
+          落在 trampoline 那 2 MiB 大页里 → 取指成功，从 <code>1:</code> 继续执行。
+          <span class="key">这等价于其它 ISA 中 identity mapping 的作用，但路径完全不同</span>。
+          <br><br>
+          ⚠️ 写 satp 到走到 <code>1:</code> 之间 <b>没有任何内存访问</b>：sp/gp 仍是 PA、trampoline 不含对应映射，
+          一旦 load/store 必崩；所以这段全是 PC-relative 和 CSR 指令。`,
   code: { file:'arch/riscv/kernel/head.S', lines:[
     {n:84,  t:'    la a2, 1f'},
-    {n:85,  t:'    add a2, a2, a1'},
-    {n:86,  t:'    csrw CSR_TVEC, a2          # stvec → 虚拟地址 1:', hl:true},
+    {n:85,  t:'    add a2, a2, a1                  # a2 = VA of 1:'},
+    {n:86,  t:'    csrw CSR_TVEC, a2               # ★ stvec ← VA of 1:', hl:true},
     {n:101, t:'    la a0, trampoline_pg_dir'},
     {n:103, t:'    srl a0, a0, PAGE_SHIFT'},
-    {n:104, t:'    or  a0, a0, a1             # a0 = trampoline | SATP_MODE_39'},
+    {n:104, t:'    or  a0, a0, a1                  # a0 = trampoline | SATP_MODE_39'},
     {n:105, t:'    sfence.vma'},
-    {n:106, t:'    csrw CSR_SATP, a0          # ★ ① MMU ON', hl:true},
-    {n:108, t:'1:'},
+    {n:106, t:'    csrw CSR_SATP, a0               # ★ ① MMU ON, satp = trampoline', hl:true},
+    {n:107, t:'    .align 2'},
+    {n:108, t:'1:                                   # ← 走到这里是经过 stvec trap'},
   ]},
   satp: { mode:'8', asid:'0', ppn:'PFN(trampoline_pg_dir)', mmu:'ON' },
-  cpu:  { pc_type:'VA (虚拟，但 ra 已在虚空间)', stvec:'1: 的虚拟地址',
-          pt_ops:'fixmap', sp:'init_stack (PA, 但映射使 VA==PA)',
-          gp:'(待 reload)', note:'仅 kernel_map.virt_addr 起 2 MiB 可达' },
+  cpu:  { pc_type:'刚才是 PA→ 经 stvec trap → 现在 VA',
+          stvec:'1: 的 VA (兜底跳转用)',
+          pt_ops:'fixmap',
+          sp:'仍是 PA！(此段禁内存访问)',
+          gp:'仍是 PA (待 Step 8 重载)',
+          note:'trampoline 映射 VA != PA：0xffffffff80000000 → kernel_map.phys_addr' },
   pgts: pgt({
     early: { entries:[
       { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table' },
@@ -792,33 +842,41 @@ const STEPS = [
       { idx:'[kern_PGD]', target:'→ trampoline_pmd', kind:'table', note:'★ satp 指向我' },
     ]},
     trampoline_pmd: { entries:[
-      { idx:'[kern_PMD]', target:`PA ${PA_KERNEL}`, leaf:true, prot:'2MB RWX' },
+      { idx:'[kern_PMD]', target:`VA 0xffff..80000000 → PA ${PA_KERNEL}`,
+        leaf:true, prot:'2MB RWX' },
     ]},
     fixmap_pte: { entries:[], note:'(全 0)' },
   }),
   va: { kernel:'partial' },
   ptOps: 'fixmap',
+  satpWrite: true,                                  // ← 新增：标记此步写 satp
 },
 
 {
   group: 'Stage 2 · 切 MMU',
   title: 'Step 8 — relocate_enable_mmu ②：satp = early_pg_dir',
-  desc:  `把 stvec 暂时改回 <code>.Lsecondary_park</code>、<code>load_global_pointer</code> 重载 gp，
-          然后 <span class="key">csrw satp, early_pg_dir | SATP_MODE_39</span> + <code>sfence.vma</code>。
-          现在整个内核镜像、fixmap 子树（含 FDT 2MB 大页）都可见。
-          <code>ret</code> 回到 head.S 的 <code>call setup_vm</code> 之后，但因为前面改写了 ra，<b>返回到虚拟地址</b>。`,
+  desc:  `进入此步时 PC 已在 VA 空间（trampoline 翻译）。
+          先把 stvec 改回 <code>.Lsecondary_park</code>、<code>load_global_pointer</code>
+          重新加载 gp（PC-relative 算出来现在是 VA）；然后
+          <span class="key">csrw satp, early_pg_dir | SATP_MODE_39</span> + <code>sfence.vma</code>。
+          这次新旧 satp 都把 kernel 那 2 MiB 映射到同一 PA、同样 RWX，所以正在执行的指令地址依旧有效，<b>不再触发 trap</b>。
+          <code>ret</code> 时跳到改写后的 <code>ra</code>（VA），<b>但此时 sp/tp 仍是 PA</b>，
+          直到 head.S 后续 <code>la sp,…</code> 重新加载才变 VA。`,
   code: { file:'arch/riscv/kernel/head.S', lines:[
     {n:110, t:'    la a0, .Lsecondary_park'},
-    {n:111, t:'    csrw CSR_TVEC, a0          # 暂时把 stvec 改回兜底'},
-    {n:114, t:'    load_global_pointer        # 重载 gp（现在 gp 是 VA）'},
-    {n:122, t:'    csrw CSR_SATP, a2          # ★ ② satp = early_pg_dir | Sv39', hl:true},
+    {n:111, t:'    csrw CSR_TVEC, a0           # stvec 改回兜底'},
+    {n:114, t:'    load_global_pointer         # gp ← VA（PC-relative）'},
+    {n:122, t:'    csrw CSR_SATP, a2           # ★ ② satp = early_pg_dir | Sv39', hl:true},
     {n:123, t:'    sfence.vma'},
-    {n:125, t:'    ret                        # 返回（已经在 VA 空间）'},
+    {n:125, t:'    ret                         # 跳 ra(VA)；但 sp/tp 仍是 PA'},
   ]},
   satp: { mode:'8', asid:'0', ppn:'PFN(early_pg_dir)', mmu:'ON' },
-  cpu:  { pc_type:'VA (虚拟)', stvec:'.Lsecondary_park (虚拟)',
-          pt_ops:'fixmap', sp:'init_stack', gp:'重载 (虚拟)',
-          note:'kernel image (RWX) + fixmap 子树全可见' },
+  cpu:  { pc_type:'VA',
+          stvec:'.Lsecondary_park (VA)',
+          pt_ops:'fixmap',
+          sp:'仍是 PA！(下一步立刻 la sp 重载)',
+          gp:'重载为 VA',
+          note:'kernel image (RWX) + fixmap 子树全可见；继续无 mem 访问' },
   pgts: pgt({
     early: { active:true, entries:[
       { idx:'[FIXADDR_PGD]', target:'→ fixmap_pmd', kind:'table', note:'★ satp 指向我' },
@@ -843,6 +901,7 @@ const STEPS = [
   }),
   va: { kernel:'mapped', fixmap:'partial' },
   ptOps: 'fixmap',
+  satpWrite: true,
 },
 
 /* ===================== STAGE 3: C kernel under early_pg_dir ===================== */
@@ -970,6 +1029,7 @@ const STEPS = [
   va: { kernel:'mapped', fixmap:'mapped', pci:'mapped', vmemmap:'partial',
         vmalloc:'partial', direct:'mapped', modules:'partial' },
   ptOps: 'late',
+  satpWrite: true,
 },
 
 {
@@ -1243,8 +1303,10 @@ function renderStepList() {
       lastGroup = s.group;
     }
     const t = s.title.replace(/^Step \d+ — /, '');
-    html += `<div class="step-item" data-idx="${i}">
-      <span class="num">${String(i+1).padStart(2,'0')}.</span>${escapeHtml(t)}
+    const cls = s.satpWrite ? 'step-item satp-write' : 'step-item';
+    const tag = s.satpWrite ? '<span class="satp-tag">satp</span>' : '';
+    html += `<div class="${cls}" data-idx="${i}">
+      <span class="step-title">${escapeHtml(t)}</span>${tag}
     </div>`;
   });
   $('stepList').innerHTML = html;

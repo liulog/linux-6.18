@@ -4,6 +4,7 @@
 >
 > 范围：从 `arch/riscv/kernel/head.S` 入口开始，直到 `start_kernel()` 调用 `rest_init()` 派生出 init 进程之前。
 > 目标 ISA：`riscv64 + Sv39`（仅 3 级页表：PGD → PMD → PTE，`P4D`/`PUD` 折叠）。
+> **本文只考虑 S-mode 内核**（即 SBI/OpenSBI 跑在 M-mode、Linux 跑在 S-mode 的常规组合），不考虑 `CONFIG_RISCV_M_MODE` 的 nommu / 单一 M-mode 场景。
 > 内核版本：Linux 6.18（当前 worktree）。
 >
 > 关键源码：
@@ -158,7 +159,7 @@ SBI/M-mode firmware  ──▶  S-mode 入口 _start
 
 ## 2. 入口阶段：`head.S` _start → _start_kernel（satp == 0，MMU OFF）
 
-入口符号链接顺序：U-Boot/OpenSBI 把控制权交给内核镜像的物理首地址 `_start`，即 `__HEAD` 段的第一条指令（`head.S:20-39`）：
+入口符号链接顺序：OpenSBI（M-mode 固件）完成自身初始化后，以 **S-mode** 把控制权交给内核镜像的物理首地址 `_start`，即 `__HEAD` 段的第一条指令（`head.S:20-39`）。SBI 调用约定：`a0 = boot hartid`，`a1 = dtb_pa`：
 
 ```asm
 SYM_CODE_START(_start)
@@ -168,19 +169,19 @@ SYM_CODE_START(_start)
 
 镜像头位于 `_start` 之后 8 字节起，记录内核 load offset、size、magic 等，给 bootloader 用。
 
-`_start_kernel`（`head.S:203` 起）在 **satp == 0、MMU off** 状态下做以下事情：
+`_start_kernel`（`head.S:203` 起）在 **satp == 0、MMU off** 状态下做以下事情（仅列 S-mode 路径）：
 
 | 步骤 | 源码位置                            | 行为                                                                                                   |
 | ---- | ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | 1    | `head.S:205-206`                    | 屏蔽中断 `csrw CSR_IE,0; csrw CSR_IP,0`                                                               |
-| 2    | `head.S:208-239` (M-mode 时)        | 设置 PMP 允许全地址、reset 通用寄存器、读 `mhartid` 到 `a0`                                          |
+| 2    | `head.S:236-238`                    | 打开 S-mode 访问 `time` CSR：`li t0,0x2; csrw CSR_SCOUNTEREN,t0`（让用户态/内核态读 `rdtime` 不再陷入 M-mode） |
 | 3    | `head.S:242`                        | `load_global_pointer` 加载 `__global_pointer$`（PC-relative）                                          |
-| 4    | `head.S:247-249`                    | 关闭 FPU/VECTOR：`csrc CSR_STATUS, SR_FS_VS`                                                           |
-| 5    | `head.S:251-277`                    | "hart lottery"：通过 `amoadd.w` 让多个 hart 中只有一个进入主初始化路径；其余跳到 `.Lsecondary_start`，等待 |
-| 6    | `head.S:291-301`                    | 清 BSS：`la a3,__bss_start; la a4,__bss_stop; ...; REG_S zero,(a3); ...`                              |
-| 7    | `head.S:302-304`                    | `boot_cpu_hartid = a0`                                                                                |
+| 4    | `head.S:247-249`                    | 关闭 FPU/VECTOR：`csrc CSR_STATUS, SR_FS_VS`（默认不允许内核态浮点/向量，便于检出误用）              |
+| 5    | `head.S:251-277`                    | "hart lottery"：通过 `amoadd.w` 让多个 hart 中只有一个进入主初始化路径；其余跳到 `.Lsecondary_start`，等待 boot CPU 把它们叫起来 |
+| 6    | `head.S:291-301`                    | 清 BSS：`la a3,__bss_start; la a4,__bss_stop; ...; REG_S zero,(a3); ...`（这一步把 `swapper_pg_dir`、`trampoline_pg_dir`、`fixmap_p*d` 等 BSS 中的页表对象全清零）|
+| 7    | `head.S:302-304`                    | `boot_cpu_hartid = a0`（SBI 通过 `a0` 把当前 hartid 传进来）                                          |
 | 8    | `head.S:307-311`                    | 准备 C 环境：`tp = init_task`, `sp = init_thread_union + THREAD_SIZE - PT_SIZE_ON_STACK`              |
-| 9    | `head.S:312-317`                    | `a0 = dtb_pa` (或 builtin dtb)                                                                         |
+| 9    | `head.S:312-317`                    | `a0 = dtb_pa`（SBI 通过 `a1` 传 DTB 物理地址，这里转入 `a0` 给 `setup_vm`）                          |
 | 10   | `head.S:318-321`                    | 设 trap vector 为 `.Lsecondary_park`（出错则死循环 wfi），然后 **`call setup_vm`**                    |
 
 > 重点：到 `call setup_vm` 时，**`satp = 0`，MMU 处于 Bare 模式**，所有访问都是物理地址。因此 `setup_vm` 内编译要求 `cmodel=medany`（PC-relative）并不被 ftrace 插桩，原因写在 `init.c:931-947` 注释里。
@@ -259,8 +260,12 @@ create_pmd_mapping(trampoline_pmd, kernel_map.virt_addr,
 ```
 
 - 只填满 `trampoline_pg_dir` 中 **1 个 PGD 槽**（对应内核镜像所在 1 GiB 区间）；其它 511 个 PGD 槽留 0。
-- 该 PGD 槽指向 `trampoline_pmd`，PMD 中放一个 **2 MiB 叶子 PMD 项**，把 `kernel_map.virt_addr` 直接指向 `kernel_map.phys_addr`。
-- 名字"跳板"的含义：**仅够让 CPU 在打开 MMU 之后从物理 PC 跳到虚拟 PC 的同一段代码**，所以它只要保证写完 satp 之后下一条指令在新 VA 下也指向同样的物理页就够了。
+- 该 PGD 槽指向 `trampoline_pmd`，PMD 中放一个 **2 MiB 叶子 PMD 项**，把 `kernel_map.virt_addr` 映射到 `kernel_map.phys_addr`。
+- ⚠️ **这是一条 VA → PA 的"高地址映射"，不是 identity mapping**：
+  - 64-bit Sv39 下 `kernel_map.virt_addr ≈ 0xffffffff80000000`（KERNEL_LINK_ADDR + KASLR offset）
+  - `kernel_map.phys_addr` = 内核镜像在 DRAM 的实际加载物理地址（如 `0x80200000`）
+  - 显然 **VA ≠ PA**。Linux RISC-V 启动不使用经典的 identity mapping，而是用 §4.2 的 **stvec trick** 来跨越 MMU 开启这一瞬间。
+- 名字"跳板"的真正含义：**让 CPU 在 MMU 打开之后能从 stvec 跳到真正在虚拟空间的下一条指令**，因此它只要保证"`1:` 标号所在那 2 MiB 在新 satp 下能取指"就够了。
 
 ### 3.6 构建 early_pg_dir：覆盖整个内核镜像
 
@@ -335,7 +340,13 @@ add a2, a2, a1                       # → 虚拟地址
 csrw CSR_TVEC, a2
 ```
 
-这一招很关键：写 satp 之后 CPU 取下一条指令时会用新的 SATP 翻译。如果新 mapping 下当前 PC 不可达，会触发 instruction fault，自动跳到 stvec 指向的 trap handler —— **而我们把 stvec 设成"下一条指令的虚拟地址"**，于是 trap handler 本身就是要去的目的地。哪怕直接 fetch 成功（VA==PA 的对齐巧合），下一条标号 `1:` 也是同一处。
+**整个 MMU 启用机制中最巧妙的一招**：
+
+- 写 satp 之后，硬件用新 satp 把 PC 当 VA 翻译。在 64-bit Sv39 下，PC 当前是个低地址 PA（例如 `0x80200124`），不在 trampoline 的高地址映射范围 → 必然触发 instruction page fault
+- trap handler = `stvec`。我们提前把 `stvec` 设成 `1:` 标号的 **VA**（如 `0xffffffff800001xx`），这是 trampoline 那条 2 MiB 大页里的合法 VA → CPU 跳过去后能正常翻译并取指
+- 这是一次"借 trap 完成跨地址空间跳转"的手法，**等价于其他 ISA 中 identity-mapping 的作用，但路径完全不同**
+
+（在 32-bit 或者 KERNEL_LINK_ADDR 设得很低的场景下，如果碰巧 `0x80200124` 这个数值同时也是 trampoline 里映射的某个 VA，就会 fall through 不触发 trap —— `head.S:95-100` 注释里说的 "or simply fall through if VA == PA" 就是这种情况。Sv39 + KERNEL_LINK_ADDR=`0xffffffff80000000` 永远走 trap 路径。）
 
 ### 4.3 算好但不写入：`a2 = early_pg_dir_PA >> 12 | satp_mode`
 
@@ -346,7 +357,7 @@ REG_L a1, 0(a1)
 or  a2, a2, a1                       # a2 待用：早期 PGD 的 satp 值
 ```
 
-### 4.4 ① 写入 trampoline_pg_dir 进入虚拟空间
+### 4.4 ① 写入 trampoline_pg_dir：开启 MMU 并跳到虚拟空间
 
 ```asm
 la a0, trampoline_pg_dir
@@ -358,41 +369,57 @@ csrw CSR_SATP, a0                    # ★★ MMU 开启，satp = trampoline | S
 1:
 ```
 
-写完瞬间：
+写完这一瞬间是整篇文档最关键的一段，慢动作解析：
 
-- MMU 处于 Sv39 模式，根表 = `trampoline_pg_dir`。
-- 此时只有 `kernel_map.virt_addr` 那 2 MiB 是可达的（既能取指又能写数据）。
-- CPU 取下一条指令，PC 是新的虚拟地址。
-- 因为 stvec 已经被设成 `1: 的虚拟地址`，即使取指失败也会跳到这里。
+1. **PC 寄存器的"数值"不会因为写 satp 而改变**。写之前 `csrw` 这条指令本身位于某个 PA（例如 `0x80200120`），写完之后 PC 还是 `0x80200124`（下一条指令的 PA）。
+2. MMU 此时已开（mode=Sv39），CPU 把 PC 当成 **虚拟地址** 来取下一条指令。它去查 `trampoline_pg_dir`：
+   - `trampoline_pg_dir` 只在 `kernel_map.virt_addr ≈ 0xffffffff80000000` 那一支有项
+   - 它根本没有 `0x80200124` 这种"低半区"的 VA → walk 失败 → **instruction page fault**
+3. 触发 trap，CPU 跳到 `stvec`。**而 stvec 在 §4.2 已经被预先设成了 `1:` 标号的虚拟地址**（约 `0xffffffff800001xx`），这个 VA 正好落在 trampoline 那 2 MiB 大页里，可以正常翻译成 `1:` 的 PA → 取指成功 → 从 `1:` 继续执行。
+4. （对照：32-bit 或某些低虚地址布局下，如果碰巧 `0x80200124` 本身也是个有效 VA，trampoline 又把它映射了，那就直接 fall through 不触发 trap —— `head.S:95-100` 注释里说的 "or simply fall through if VA == PA" 就是这种情况。**Sv39 + KERNEL_LINK_ADDR 永远走 trap 路径**。）
 
-**这是 satp 的第一次写入**，从此之后所有访问都走 Sv39 翻译。
+> ⚠️ **不是 identity mapping！** 很多其他 ISA 在 MMU 启动时会临时建立一段 VA==PA 的 identity 段；RISC-V Linux **不这么干**，而是用上述 "stvec 兜底跳转" 的设计把 PC 一步切到高地址 VA。
+
+写 satp 后到走到 `1:` 之间这段，**绝对不能做任何内存访问（含 stack/data）**，原因是：
+- 当前 `sp`、`gp` 都是 MMU off 阶段算出来的 PA 值，trampoline 里没有对应映射 → 一旦访问就会再触发 load/store fault
+- 所以 head.S 这段只允许 PC-relative 的 `la`、立即数 `li`、以及 CSR / 算术指令，**没有一条 load/store**
+
+**这是 satp 的第一次写入**，从此之后所有 fetch 都走 Sv39 翻译。
 
 ### 4.5 ② 写入 early_pg_dir：扩展可见范围到完整内核 + fixmap
 
 ```asm
 la a0, .Lsecondary_park
 csrw CSR_TVEC, a0                    # 暂时把 stvec 改回兜底 park
-load_global_pointer                  # 重新加载 gp（现在 gp 是虚拟地址）
+load_global_pointer                  # 重新加载 gp（现在 PC-relative 算出来的是 VA）
 
 csrw CSR_SATP, a2                    # ★★ 第二次：satp = early_pg_dir | Sv39
 sfence.vma
 ret
 ```
 
-写完瞬间：
+要点：
 
-- 根表 = `early_pg_dir`：整个内核镜像（多 PGD 槽 × 多 PMD 项 × 2MB）都可见。
-- `FIXADDR_START` 那一支也通了：fixmap 中已经填好的 FDT 两个 2MB 大页可访问。
-- `ret` 回到 head.S 的 `setup_vm` 调用之后那条指令，但因为 §4.1 改写了 `ra`，**返回的是虚拟地址**。
+- 进到这里时 PC 已经在 VA 空间（trampoline 翻译过）。重载 `gp` 之前不能访问 stack，所以 head.S 这里仍然只用 PC-relative 指令。
+- 写完 satp 后 `sfence.vma` 是确保新 PGD 生效；接着 `ret` 跳到 `ra`。`ra` 在 §4.1 已经被加上 `va_kernel_pa_offset` 改成 VA，所以 `ret` 返回到 head.S 中 `call relocate_enable_mmu` 后面那条指令的 **VA**。
+- 切到 early_pg_dir 后能看到的：
+  - 整个内核镜像（多 PGD 槽 × 多 PMD 项 × 2 MiB 大页 RWX）
+  - `FIXADDR_START` 子树（fixmap_pmd 中预先放好的 FDT 两个 2 MiB 大页可访问；fixmap_pte 里的项暂时全 0，后续 `__set_fixmap` 才填）
 
-> 顺序之所以"先 trampoline 再 early"：trampoline 是为了"把 PC 从物理空间一次性带到虚拟空间"，期间需要 VA==PA 也 OK（trampoline 中那条 2 MiB 大页确实保证了内核镜像那段的 VA==PA 在物理层级别同样落到同样的 2MB）。如果直接写 early_pg_dir，理论上 early_pg_dir 也有这条映射，但 trampoline 多了一道 `sfence.vma` + 单页 PGD 的最小集，规避了 "old translation 缓存在 TLB" 的潜在问题（注释见 `head.S:95-100`）。
+> 为什么必须"先 trampoline 再 early"，不直接一步写 early_pg_dir？
+>
+> 1. **最小化第一次切换的不确定性**。trampoline 只有 1 个 PGD 槽 + 1 个 PMD 大页，是绝对最小集。即使 early_pg_dir 此刻被某个隐含 bug 写坏了别处，第一次切换也不依赖那些位置，能保证最少跳到 `1:` 是稳定的。
+> 2. **TLB 状态干净**。两次切换之间各有 `sfence.vma`，让 trampoline 的 entry 不会被错误带入到 early_pg_dir 时代。`head.S:115-120` 注释强调："Fetching the fence is guaranteed to work because that first superpage is translated the same way" —— 这里依赖的是两表对 kernel 那 2 MiB 的映射**结果一致**（VA → 同一个 PA、同样 RWX），所以从 trampoline 切到 early 时，正在执行的指令所在地址依然有效。
+> 3. **secondary CPU 复用**。`head.S:166-171` 的 `secondary_start_sbi` 会直接 `call relocate_enable_mmu(swapper_pg_dir)`，也走"trampoline → swapper"两步切换。把这套机制做成统一调用更省事。
+
+从 `ret` 那一刻起，**a) PC 在 VA；b) ra 在 VA；c) 但 sp/tp/gp 中 sp、tp 还是 PA**！紧接着 head.S 的下一段会立刻重载（见 §4.6）。
 
 ### 4.6 返回到 `_start_kernel` 之后的余下流程
 
 ```asm
                                           # MMU ON, satp = early_pg_dir | Sv39
     call .Lsetup_trap_vector              # stvec = handle_exception (虚拟地址)
-    la   tp, init_task                    # 恢复 C 运行所需 tp/sp
+    la   tp, init_task                    # ★ 重新加载 tp/sp 为 VA
     la   sp, init_thread_union + THREAD_SIZE
     addi sp, sp, -PT_SIZE_ON_STACK
     scs_load_current
@@ -403,7 +430,13 @@ ret
     tail start_kernel                     # ↓ 进入通用内核代码
 ```
 
-**进入 `start_kernel()` 时**：`satp = early_pg_dir | SATP_MODE_39`，MMU 已开。
+接续 §4.5 末尾 "sp/tp 仍是 PA" 的伏笔：
+
+- `call .Lsetup_trap_vector` 是 **leaf call**（`.Lsetup_trap_vector` 内没有 `call`，只有 `csrw`），RISC-V 的 `call` 只更新 `ra` 寄存器、不压栈，所以这一步并不访问 sp 指向的内存，安全。
+- 紧接着 `la tp, init_task` 和 `la sp, init_thread_union + THREAD_SIZE` 都是 **PC-relative**：因为现在 PC 已经在 VA 空间，所算出的也是 VA。**这就是 sp / tp 从 PA 切换到 VA 的瞬间**。
+- 之后 KASAN/SoC/start_kernel 的所有 C 调用、栈访问就都安全了。
+
+**进入 `start_kernel()` 时**：`satp = early_pg_dir | SATP_MODE_39`，MMU 已开，sp/tp/gp/ra 全部已就位为 VA。
 
 ---
 
@@ -618,9 +651,13 @@ phys-bringup │ setup_vm() │ relocate_enable_mmu │ start_kernel..paging_ini
 
 ## 9. 一些常见疑问（Sv39 视角）
 
-1. **为什么需要 trampoline 而不直接写 early_pg_dir？**
-   - `relocate_enable_mmu` 注释（`head.S:95-100`）解释：trampoline 只覆盖那 1 个 PGD 槽，写完之后 `sfence.vma` 范围最小，确保旧的 satp/TLB 影响最小化。其设计思想是"先用一张只够取下一条指令的最小映射切到 VA 空间，再切到完整的 early"。
-   - 此外 secondary CPU 启动也直接复用 trampoline（`head.S:168-171`），写完后再切 swapper_pg_dir。
+1. **trampoline_pg_dir 是 identity mapping 吗？为什么需要它？**
+   - **不是** identity mapping。它把 `VA = kernel_map.virt_addr ≈ 0xffffffff80000000` 映射到 `PA = kernel_map.phys_addr`（如 `0x80200000`），VA ≠ PA。
+   - Linux RISC-V 启动**不使用** identity mapping 那一招，而是用 §4.2 的 **stvec trick**："写 satp 必然触发 instruction fault → 跳到 stvec 预设的虚地址" 来完成从 PA 到 VA 的切换。
+   - 需要 trampoline 而不直接写 early_pg_dir 的原因（`head.S:95-120` 注释）：
+     (a) trampoline 是最小集（1 个 PGD 槽 + 1 个 PMD 大页），第一次切换不依赖 early_pg_dir 中其它任何位置，最稳；
+     (b) 两次切换中间的 `sfence.vma` 让 TLB 状态干净，避免旧映射污染新表；
+     (c) secondary CPU 启动也复用同一套机制（`head.S:166-171`，最终目标 swapper_pg_dir），调用 `relocate_enable_mmu` 一致。
 
 2. **`early_pg_dir` 跟 `swapper_pg_dir` 的最大差别？**
    - `early_pg_dir`：只覆盖内核镜像（大页 RWX）+ fixmap 子树（仅 PGD 项+ FDT 大页）。
