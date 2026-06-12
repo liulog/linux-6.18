@@ -1112,6 +1112,9 @@ static int k1_pcie_probe(struct platform_device *pdev)
 	else
 		dev_info(dev, "spacemit-pcie: link is down after host_init\n");
 #endif
+
+	device_enable_async_suspend(&pdev->dev);
+
 	return 0;
 
 err_disable_pcie_irq:

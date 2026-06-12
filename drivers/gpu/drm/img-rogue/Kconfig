@@ -38,3 +38,15 @@ config POWERVR_THERMAL
 	  (CONFIG_K3_THERMAL).
 
 	  Say Y here if you want to enable PowerVR thermal management.
+
+config POWERVR_DISABLE_APM
+    bool "Disable PowerVR Active Power Management (APM)"
+    default n
+    depends on POWERVR_ROGUE
+    help
+      When enabled, this option disables the Active Power Management (APM)
+      feature of the PowerVR GPU driver. PowerVR's APM is forcibly turned off,
+      which may impact power consumption characteristics.
+
+      Note: It is recommended to leave this disabled (default) unless you have
+      specific requirements for disabling APM.

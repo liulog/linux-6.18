@@ -15,7 +15,6 @@
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
-#include <linux/suspend.h>
 #include <scsi/scsi_device.h>
 
 #include <ufs/ufshcd.h>
@@ -140,7 +139,7 @@ static void ufs_spacemit_dump_host_regs(struct ufs_hba *hba)
 	}
 	len += scnprintf(buf + len, VENDOR_DUMP_BUF_SIZE - len, "\n");
 
-	dev_warn(hba->dev, "%s", buf);
+	dev_dbg(hba->dev, "%s", buf);
 
 	kfree(buf);
 }
@@ -466,7 +465,7 @@ static int ufs_spacemit_link_startup_post_change(struct ufs_hba *hba)
 		ufshcd_dme_get(hba,
 			       UIC_ARG_MIB_SEL(0xC1, UIC_ARG_MPHY_RX_GEN_SEL_INDEX(1)),
 			       &rx1_fsm_status);
-		dev_err(hba->dev, "ufs: send dummy frame, rx1_fsm_status:0x%x\n",
+		dev_dbg(hba->dev, "ufs: send dummy frame, rx1_fsm_status:0x%x\n",
 			rx1_fsm_status);
 	}
 
@@ -493,7 +492,7 @@ static int ufs_spacemit_link_startup_notify(struct ufs_hba *hba,
 	}
 
 	if (err)
-		dev_err(hba->dev, "%s: status=%d failed: %d\n", __func__, status, err);
+		dev_dbg(hba->dev, "%s: status=%d failed: %d\n", __func__, status, err);
 
 	return err;
 }
@@ -849,17 +848,19 @@ static int ufs_spacemit_init(struct ufs_hba *hba)
 
 	/* Make a two way bind between the spacemit k3 host and the hba */
 	host->hba = hba;
-	host->saved_spm_lvl = -1;
 	ufshcd_set_variant(hba, host);
 	ufs_spacemit_set_caps(hba);
 	ufs_spacemit_advertise_quirks(hba);
 
 	/*
-	 * Keep the link active by default. Standby, where the UFS power is lost
-	 * externally, overrides system PM to UFS_PM_LVL_5 in prepare().
+	 * Link stability: tear the link down on every system suspend
+	 * (POWERDOWN + link OFF). On resume the core takes the link-off
+	 * path in __ufshcd_wl_resume() and runs ufshcd_reset_and_restore(),
+	 * i.e. a full host/device re-probe (HCE enable + link startup +
+	 * power mode change), instead of the fragile Hibern8 exit recovery.
 	 */
 	hba->rpm_lvl = UFS_PM_LVL_2;
-	hba->spm_lvl = UFS_PM_LVL_2;
+	hba->spm_lvl = UFS_PM_LVL_5;
 
 	err = ufshcd_vops_phy_initialization(host->hba);
 out:
@@ -1167,25 +1168,35 @@ static int ufs_spacemit_hce_enable_notify(struct ufs_hba *hba,
 					     enum ufs_notify_change_status status)
 {
 	static bool is_first_hce = true;
-	u32 enable_val, val;
+	u32 val;
+	int timeout;
 
 	if (status == PRE_CHANGE) {
-		enable_val = CONTROLLER_ENABLE;
-
-		if (hba->caps & UFSHCD_CAP_CRYPTO)
-			enable_val = CRYPTO_GENERAL_ENABLE | CONTROLLER_ENABLE;
-
 		if (is_first_hce) {
 			is_first_hce = false;
 		} else {
 			val = ufshcd_readl(hba, REG_CONTROLLER_ENABLE);
-			if (val == enable_val) {
-				ufshcd_writel(hba,
-					      enable_val & (1 << CONTROLLER_ENABLE),
+			if (val & CONTROLLER_ENABLE) {
+				ufshcd_writel(hba, CONTROLLER_DISABLE,
 					      REG_CONTROLLER_ENABLE);
-				while (ufshcd_readl(hba, REG_CONTROLLER_ENABLE) ==
-				       (enable_val & (1 << CONTROLLER_ENABLE)))
-					;
+				timeout = MPHY_PLL_LOCK_TIMEOUT_US;
+				while (ufshcd_readl(hba, REG_CONTROLLER_ENABLE) &
+				       CONTROLLER_ENABLE) {
+					if (--timeout <= 0) {
+						/*
+						 * The core ignores the PRE_CHANGE
+						 * return value, so only log here;
+						 * the core enable poll will report
+						 * a hard failure if HCE never clears.
+						 */
+						dev_err(hba->dev,
+							"%s: controller disable timeout, REG_CONTROLLER_ENABLE=0x%08x\n",
+							__func__,
+							ufshcd_readl(hba, REG_CONTROLLER_ENABLE));
+						break;
+					}
+					udelay(1);
+				}
 			}
 		}
 	}
@@ -1267,49 +1278,11 @@ static void ufs_spacemit_remove(struct platform_device *pdev)
 	pm_runtime_put(&(pdev)->dev);
 }
 
-static bool ufs_spacemit_standby_loses_power(void)
-{
-	return pm_suspend_target_state == PM_SUSPEND_STANDBY;
-}
-
-static int ufs_spacemit_suspend_prepare(struct device *dev)
-{
-	struct ufs_hba *hba = dev_get_drvdata(dev);
-	struct ufs_spacemit_host *host = ufshcd_get_variant(hba);
-	int ret;
-
-	if (ufs_spacemit_standby_loses_power() && hba->spm_lvl < UFS_PM_LVL_5) {
-		host->saved_spm_lvl = hba->spm_lvl;
-		hba->spm_lvl = UFS_PM_LVL_5;
-	}
-
-	ret = ufshcd_suspend_prepare(dev);
-	if (ret < 0 && host->saved_spm_lvl != -1) {
-		hba->spm_lvl = host->saved_spm_lvl;
-		host->saved_spm_lvl = -1;
-	}
-
-	return ret;
-}
-
-static void ufs_spacemit_resume_complete(struct device *dev)
-{
-	struct ufs_hba *hba = dev_get_drvdata(dev);
-	struct ufs_spacemit_host *host = ufshcd_get_variant(hba);
-
-	ufshcd_resume_complete(dev);
-
-	if (host->saved_spm_lvl != -1) {
-		hba->spm_lvl = host->saved_spm_lvl;
-		host->saved_spm_lvl = -1;
-	}
-}
-
 static const struct dev_pm_ops ufs_spacemit_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(ufshcd_system_suspend, ufshcd_system_resume)
 	SET_RUNTIME_PM_OPS(ufs_spacemit_runtime_suspend, ufs_spacemit_runtime_resume, NULL)
-	.prepare = ufs_spacemit_suspend_prepare,
-	.complete = ufs_spacemit_resume_complete,
+	.prepare = ufshcd_suspend_prepare,
+	.complete = ufshcd_resume_complete,
 };
 
 static struct platform_driver ufs_spacemit_platform_driver = {

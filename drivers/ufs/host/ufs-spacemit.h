@@ -79,7 +79,6 @@ struct ufs_spacemit_host {
 	struct regulator *ufs_vccq; /* Optional Vccq supply 1.2V */
 	struct regulator *ufs_vccq2; /* Optional Vccq2 supply 1.8V*/
 	struct reset_control *rst; /* Reset control for UFS AXI */
-	int saved_spm_lvl;
 };
 
 #define ufs_spacemit_is_link_off(hba) ufshcd_is_link_off(hba)

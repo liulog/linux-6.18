@@ -2954,6 +2954,7 @@ static int soc_dp_bind(struct device *dev, struct device *master, void *data)
 		return ret;
 	}
 #endif
+	device_enable_async_suspend(dev);
 
 	return 0;
 }

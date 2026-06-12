@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/limits.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/io.h>
 #include <linux/regmap.h>
@@ -41,6 +42,9 @@
 #define K3_MBOX_VQ0_ID	0
 #define K3_MBOX_VQ1_ID	1
 
+/* Maximum sane size for a resource table */
+#define RSC_TABLE_MAX_SIZE	SZ_64K
+
 struct spacemit_mbox {
 	const char *name;
 	struct mbox_chan *chan;
@@ -55,6 +59,8 @@ struct spacemit_rproc {
 	struct device *dev;
 	struct spacemit_mbox mb[MAX_MBOX];
 	unsigned int size;
+	void __iomem *rsc_table_va;	 /* ioremap'd I/O window, for write-back */
+	struct resource_table *rsc_table_ptr; /* kmalloc'd copy returned to core */
 };
 
 static int spacemit_rproc_mem_alloc(struct rproc *rproc, struct rproc_mem_entry *mem)
@@ -165,38 +171,117 @@ static int spacemit_rproc_attach(struct rproc *rproc)
 
 static int spacemit_rproc_detach(struct rproc *rproc)
 {
+	struct spacemit_rproc *priv = rproc->priv;
+
+	/*
+	 * The core's rproc_reset_rsc_table_on_detach() writes the clean
+	 * resource table back via plain memcpy(table_ptr, clean_table, sz),
+	 * which updates only our kmalloc'd heap copy (rsc_table_ptr).
+	 * The remote processor's actual reserved-memory region is unaffected.
+	 * Sync the updated heap copy back to the I/O region now so the remote
+	 * processor sees a clean table on the next attach.
+	 */
+	if (priv->rsc_table_va && priv->rsc_table_ptr)
+		memcpy_toio(priv->rsc_table_va, priv->rsc_table_ptr,
+			    rproc->table_sz);
+
 	return 0;
 }
 
-static struct resource_table* spacemit_get_loaded_rsc_table(
+/*
+ * spacemit_get_loaded_rsc_table - return a snapshot of the resource table
+ *                                  installed by the remote processor.
+ *
+ * The remoteproc core passes the returned pointer to kmemdup() (plain
+ * memcpy) and later uses it as rproc->table_ptr for ordinary load/store
+ * access.  On RISC-V, device-memory mappings created by ioremap() cannot
+ * be accessed with plain load instructions — doing so triggers a load
+ * access fault in __memcpy.  We therefore copy the table from the I/O
+ * region into a kmalloc buffer using memcpy_fromio() and return that.
+ *
+ * The rcpu*_rsc_table regions carry "no-map" in DT, so ioremap() is the
+ * correct accessor; memremap(MEMREMAP_WB) would not work on them.
+ *
+ * Write-back on detach: the core's rproc_reset_rsc_table_on_detach()
+ * writes the clean table back via plain memcpy(table_ptr, ...), which
+ * updates only our heap copy — the remote processor's reserved-memory
+ * region is unaffected.  spacemit_rproc_detach() handles the actual
+ * write-back to the I/O region using memcpy_toio().
+ *
+ * Ownership: the kmalloc buffer is stored in priv->rsc_table_ptr and
+ * freed in spacemit_rproc_remove().  On repeated attach() calls the old
+ * buffer and ioremap mapping are released before new ones are created.
+ * The remoteproc core never frees the pointer returned here.
+ */
+static struct resource_table *spacemit_get_loaded_rsc_table(
 				struct rproc *rproc, size_t *size)
 {
+	struct spacemit_rproc *priv = rproc->priv;
 	struct device *dev = rproc->dev.parent;
 	struct device_node *np = dev->of_node;
 	struct of_phandle_iterator it;
 	struct reserved_mem *rmem;
+	void __iomem *io_va;
+	struct resource_table *table;
 
-	/* Register associated reserved memory regions */
 	of_phandle_iterator_init(&it, np, "memory-region", NULL, 0);
 	while (of_phandle_iterator_next(&it) == 0) {
+		if (strcmp(it.node->name, "rcpu0_rsc_table") &&
+		    strcmp(it.node->name, "rcpu1_rsc_table"))
+			continue;
+
 		rmem = of_reserved_mem_lookup(it.node);
 		if (!rmem) {
-			dev_err(&rproc->dev, "unable to acquire memory-region\n");
+			dev_err(&rproc->dev, "unable to acquire memory-region %s\n",
+				it.node->name);
+			of_node_put(it.node);
 			return NULL;
 		}
 
-		if (rmem->base > U64_MAX) {
-			dev_err(&rproc->dev, "the rmem base is overflow\n");
-			return NULL;
+		if (rmem->size > RSC_TABLE_MAX_SIZE) {
+			dev_err(&rproc->dev,
+				"memory-region %s too large (%zu > %u), suspicious DT\n",
+				it.node->name, (size_t)rmem->size,
+				RSC_TABLE_MAX_SIZE);
+			of_node_put(it.node);
+			return ERR_PTR(-EINVAL);
 		}
 
-		if (!strcmp(it.node->name, "rcpu0_rsc_table")) {
-			*size = rmem->size;
-			return (struct resource_table *)ioremap(rmem->base, rmem->size);
-		} else if (!strcmp(it.node->name, "rcpu1_rsc_table")) {
-			*size = rmem->size;
-			return (struct resource_table *)ioremap(rmem->base, rmem->size);
+		/* Release any mapping left from a previous attach() */
+		if (priv->rsc_table_va) {
+			iounmap(priv->rsc_table_va);
+			priv->rsc_table_va = NULL;
 		}
+		kfree(priv->rsc_table_ptr);
+		priv->rsc_table_ptr = NULL;
+
+		io_va = ioremap(rmem->base, rmem->size);
+		if (!io_va) {
+			dev_err(&rproc->dev, "ioremap failed for %s\n",
+				it.node->name);
+			of_node_put(it.node);
+			return ERR_PTR(-ENOMEM);
+		}
+
+		table = kmalloc(rmem->size, GFP_KERNEL);
+		if (!table) {
+			iounmap(io_va);
+			of_node_put(it.node);
+			return ERR_PTR(-ENOMEM);
+		}
+
+		/*
+		 * memcpy_fromio() is required here — ioremap() VA cannot be
+		 * read with plain load instructions on RISC-V.
+		 */
+		memcpy_fromio(table, io_va, rmem->size);
+
+		priv->rsc_table_va  = io_va;
+		priv->rsc_table_ptr = table;
+		*size = rmem->size;
+
+		of_node_put(it.node);
+		return table;
 	}
 
 	return NULL;
@@ -321,8 +406,6 @@ err_0:
 			kthread_stop(priv->mb[i].mb_thread);
 	}
 
-	rproc_free(rproc);
-
 	return ret;
 }
 
@@ -350,7 +433,13 @@ static void spacemit_rproc_remove(struct platform_device *pdev)
 
 	rproc_del(rproc);
 	k3_rproc_free_mbox(rproc);
-	rproc_free(rproc);
+
+	if (ddata->rsc_table_va) {
+		iounmap(ddata->rsc_table_va);
+		ddata->rsc_table_va = NULL;
+	}
+	kfree(ddata->rsc_table_ptr);
+	ddata->rsc_table_ptr = NULL;
 }
 
 static const struct of_device_id spacemit_rproc_of_match[] = {

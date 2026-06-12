@@ -98,7 +98,7 @@ enum {
 #define UFSHCD_REF_CLK_GATING_WAIT_US 0xFF /* microsecs */
 
 /* Polling time to wait for fDeviceInit */
-#define FDEVICEINIT_COMPL_TIMEOUT 10000 /* millisecs */
+#define FDEVICEINIT_COMPL_TIMEOUT 1500 /* millisecs */
 
 /* Default RTC update every 10 seconds */
 #define UFS_RTC_UPDATE_INTERVAL_MS (10 * MSEC_PER_SEC)
@@ -2391,10 +2391,6 @@ void ufshcd_send_command(struct ufs_hba *hba, unsigned int task_tag,
 		__set_bit(lrbp->task_tag, &hba->outstanding_reqs);
 		ufshcd_writel(hba, 1 << lrbp->task_tag,
 			      REG_UTP_TRANSFER_REQ_DOOR_BELL);
-#ifdef CONFIG_SCSI_UFS_SPACEMIT_K3
-		/* Flush posted doorbell write to avoid command loss on K3. */
-		ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL);
-#endif
 		spin_unlock_irqrestore(&hba->outstanding_lock, flags);
 	}
 }
@@ -4525,7 +4521,7 @@ int ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
 			__func__, ret);
 	else
 		ufshcd_vops_hibern8_notify(hba, UIC_CMD_DME_HIBER_ENTER,
-							POST_CHANGE);
+								POST_CHANGE);
 
 	return ret;
 }
@@ -4760,6 +4756,7 @@ static int ufshcd_change_power_mode(struct ufs_hba *hba,
 	ret = ufshcd_uic_change_pwr_mode(hba, pwr_mode->pwr_rx << 4
 			| pwr_mode->pwr_tx);
 #endif
+
 	if (ret) {
 		dev_err(hba->dev,
 			"%s: power mode change failed %d\n", __func__, ret);
@@ -5670,9 +5667,7 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba,
 					unsigned long completed_reqs)
 {
 	int tag;
-#ifdef CONFIG_SCSI_UFS_SPACEMIT_K3
-	dma_rmb();
-#endif
+
 	for_each_set_bit(tag, &completed_reqs, hba->nutrs)
 		ufshcd_compl_one_cqe(hba, tag, NULL);
 }
@@ -7750,13 +7745,6 @@ static int ufshcd_abort(struct scsi_cmnd *cmd)
 	bool outstanding;
 	u32 reg;
 
-#ifdef CONFIG_SCSI_UFS_SPACEMIT_K3
-	/* Bypass "Task Management Abort" and force SCSI error
-	 * recovery to take a more aggressive Reset/Re-link path
-	 * to accelerate the recovery process. */
-	return err;
-#endif
-
 	ufshcd_hold(hba);
 
 	if (!hba->mcq_enabled) {
@@ -9678,16 +9666,6 @@ static int ufshcd_set_dev_pwr_mode(struct ufs_hba *hba,
 	 * callbacks hence set the RQF_PM flag so that it doesn't resume the
 	 * already suspended childs.
 	 */
-#ifdef CONFIG_SCSI_UFS_SPACEMIT_K3
-	if ((pwr_mode == UFS_ACTIVE_PWR_MODE) && ufshcd_is_ufs_dev_active(hba)) {
-		printk(KERN_WARNING "ufs: ufshcd_set_dev_pwr_mode skip SSU cmd\n");
-		ret = 0;
-		hba->curr_dev_pwr_mode = pwr_mode;
-		scsi_device_put(sdp);
-		hba->host->eh_noresume = 0;
-		return ret;
-	}
-#endif
 	ret = ufshcd_execute_start_stop(sdp, pwr_mode, &sshdr);
 	if (ret) {
 		sdev_printk(KERN_WARNING, sdp,
@@ -10064,19 +10042,9 @@ static int __ufshcd_wl_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 		if (!ret) {
 			ufshcd_set_link_active(hba);
 		} else {
-#ifdef CONFIG_SCSI_UFS_SPACEMIT_K3
-			printk(KERN_WARNING "ufs: ufshcd_reset_and_restore for hibern8 exit\n");
-			ret = ufshcd_reset_and_restore(hba);
-			if (ret) {
-				dev_err(hba->dev, "%s: hibern8 exit failed %d\n",
-						__func__, ret);
-				goto vendor_suspend;
-			}
-#else
 			dev_err(hba->dev, "%s: hibern8 exit failed %d\n",
 					__func__, ret);
 			goto vendor_suspend;
-#endif
 		}
 	} else if (ufshcd_is_link_off(hba)) {
 		/*

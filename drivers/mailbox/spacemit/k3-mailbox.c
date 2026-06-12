@@ -115,6 +115,11 @@ static int spacemit_chan_send_data(struct mbox_chan *chan, void *data)
 	writel(data ? *(u32 *)data : 0, (void *)&mbox->regs->mbox_msg[chan_num]);
 
 	if (!mbox->is_remote) {
+		/* enable the other end new msg irq */
+		j = readl((void *)&mbox->regs->mbox_irq[USER1_MBOX_OFFSET].irq_en_set);
+		j |= (1 << (chan_num * 2));
+		writel(j, (void *)&mbox->regs->mbox_irq[USER1_MBOX_OFFSET].irq_en_set);
+
 		/* set not full thresh */
 		j = readl((void *)&mbox->regs->mbox_thresh[USER0_MBOX_OFFSET].thresh0);
 		j |= 1 << (chan_num * 8 + 4);

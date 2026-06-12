@@ -9,9 +9,10 @@
 #include <linux/kernel.h>
 #include <linux/log2.h>
 #include <linux/types.h>
-#include <sys/mman.h>
 
 #include <stdlib.h>
+#include <elf.h>
+#include <gelf.h>
 
 #include "auxtrace.h"
 #include "color.h"
@@ -28,6 +29,7 @@
 #include "thread-stack.h"
 #include "util.h"
 #include "dso.h"
+#include "symbol.h"
 #include "addr_location.h"
 #include <inttypes.h>
 #include "util/synthetic-events.h"
@@ -54,6 +56,7 @@ struct rvtrace_auxtrace {
 	u64 branches_id;
 	u64 **metadata;
 	unsigned int pmu_type;
+	struct dso *machine_code_dso;
 };
 
 struct rvtrace_queue {
@@ -81,42 +84,105 @@ static void rvtrace_set_thread(struct rvtrace_queue *rvtraceq,
 		rvtraceq->thread = machine__idle_thread(rvtrace->machine);
 }
 
-static u32 rvtrace_devmem_access(u64 address, size_t size, u8 *buffer)
+/* Map physical address to file offset by reading ELF program headers */
+static u64 rvtrace_map_paddr_to_offset(const char *filename, u64 paddr, u64 base)
 {
-	int fd;
-	void *map_base, *virt_addr;
-	u64 page_size = 4096, mapped_size = 4096;
-	u64 page_base = address & ~(page_size - 1);
-	u64 offset_in_page = address - page_base;
-	unsigned int width = 8 * size;
+	FILE *fp;
+	Elf *elf;
+	GElf_Ehdr ehdr;
+	GElf_Phdr phdr;
+	size_t i, phdrnum;
+	u64 file_offset = (u64)-1;
+	u64 relative_paddr;
 
-	if (offset_in_page + width > page_size)
-		mapped_size *= 2;
+	if (!filename || paddr < base)
+		return (u64)-1;
 
-	fd = open("/dev/mem", O_RDONLY | O_SYNC);
-	if (fd < 0)
-		return 0;
+	/* Convert absolute physical address to relative address using base */
+	relative_paddr = paddr - base;
 
-	map_base = mmap(NULL, mapped_size, PROT_READ, MAP_SHARED, fd, (off_t)(page_base));
-	if (map_base == MAP_FAILED) {
-		pr_debug("failed to mmap device address 0x%lx\n", address);
-		close(fd);
-		return 0;
+	fp = fopen(filename, "r");
+	if (!fp)
+		return (u64)-1;
+
+	elf_version(EV_CURRENT);
+	elf = elf_begin(fileno(fp), ELF_C_READ, NULL);
+	if (!elf)
+		goto out_fclose;
+
+	if (!gelf_getehdr(elf, &ehdr))
+		goto out_elf_end;
+
+	if (elf_getphdrnum(elf, &phdrnum) != 0)
+		goto out_elf_end;
+
+	/* Find the program header that contains this relative physical address */
+	for (i = 0; i < phdrnum; i++) {
+		if (!gelf_getphdr(elf, i, &phdr))
+			continue;
+
+		/* Check if relative address is within this segment */
+		if (phdr.p_type == PT_LOAD &&
+		    relative_paddr >= phdr.p_paddr &&
+		    relative_paddr < phdr.p_paddr + phdr.p_memsz) {
+			/* Calculate file offset */
+			file_offset = phdr.p_offset + (relative_paddr - phdr.p_paddr);
+			break;
+		}
 	}
 
-	virt_addr = (char*)map_base + offset_in_page;
+out_elf_end:
+	elf_end(elf);
+out_fclose:
+	fclose(fp);
+	return file_offset;
+}
 
-	/*
-	 * Note: higher versions of glibc use automatic vectorization by
-	 * default for memcpy, which can lead to incorrect memory results.
-	 */
-	for (size_t i = 0; i < size; i++)
-		buffer[i] = ((volatile u8*)virt_addr)[i];
-	// memcpy(buffer, virt_addr, size);
+static u32 rvtrace_machine_mode_access(struct rvtrace_queue *rvtraceq, u64 address,
+				       size_t size, u8 *buffer)
+{
+	struct dso *dso;
+	int len;
+	u64 file_offset;
+	u64 base_addr = 0;
 
-	munmap(map_base, mapped_size);
-	close(fd);
-	return size;
+	/* Parse machine_code_base if provided */
+	if (symbol_conf.machine_code_base) {
+		base_addr = strtoull(symbol_conf.machine_code_base, NULL, 0);
+	}
+
+	/* Try to read from machine_code_dso if available */
+	if (rvtraceq && rvtraceq->rvtrace->machine_code_dso) {
+		dso = rvtraceq->rvtrace->machine_code_dso;
+
+		/* Map physical address to file offset using ELF program headers */
+		file_offset = rvtrace_map_paddr_to_offset(dso__long_name(dso), address, base_addr);
+		if (file_offset != (u64)-1) {
+			len = dso__data_read_offset(dso, rvtraceq->rvtrace->machine,
+						   file_offset, buffer, size);
+			if (len > 0) {
+				return len;
+			}
+		} else {
+			pr_debug("Failed to map physical address 0x%lx to file offset in %s\n",
+				 address, dso__long_name(dso));
+		}
+
+		/* DSO read failed, warn user once */
+		ui__warning_once("RISC-V Nexus Trace: Failed to read machine mode code at address 0x%lx from DSO.\n"
+				 "                  Use option '-m /path/to/machine-code --machine-code-base 0xBASE'\n"
+				 "                  to specify the binary and its base address.\n",
+				 address);
+	} else {
+		/* No machine code DSO provided, warn user once */
+		ui__warning_once("RISC-V Nexus Trace: Machine mode code binary not provided.\n"
+				 "                  Failed to read address 0x%lx.\n"
+				 "                  Use option '-m /path/to/machine-code --machine-code-base 0xBASE'\n"
+				 "                  to specify the binary and its base address.\n",
+				 address);
+	}
+
+	return 0;
 }
 
 static u32 rvtrace_mem_access(void *data, u64 address, enum riscv_privilege_mode prv,
@@ -136,9 +202,9 @@ static u32 rvtrace_mem_access(void *data, u64 address, enum riscv_privilege_mode
 
 	addr_location__init(&al);
 
-	/* If the riscv_privilege_mode is machine mode, access physical address by /dev/mem */
+	/* If the riscv_privilege_mode is machine mode, access physical address */
 	if (prv == RISCV_PRIV_MACHINE_MODE)
-		return rvtrace_devmem_access(address, size, buffer);
+		return rvtrace_machine_mode_access(rvtraceq, address, size, buffer);
 
 	machine = rvtraceq->rvtrace->machine;
 	if (address >= machine__kernel_start(machine))
@@ -342,6 +408,8 @@ static int rvtrace_process_queue(struct rvtrace_queue *rvtraceq)
 			rvtrace_synth_branch_sample(rvtraceq, &packet);
 		else if (packet.sample_type == RVTRACE_LOSS)
 			fprintf(stdout, "RISC-V Trace: A FIFO overrun has resulted in the loss of one or more messages\n");
+		else if (packet.sample_type == RVTRACE_ERROR)
+			fprintf(stdout, "RISC-V Trace: An error occurred while parsing trace packet data\n");
 	}
 
 	return 0;
@@ -713,6 +781,8 @@ static void rvtrace_free(struct perf_session *session)
 		zfree(&rvtrace->metadata[i]);
 
 	zfree(&rvtrace->metadata);
+	if (rvtrace->machine_code_dso)
+		dso__put(rvtrace->machine_code_dso);
 	zfree(&rvtrace);
 }
 
@@ -995,6 +1065,22 @@ int rvtrace_process_auxtrace_info(union perf_event *event,
 
 	rvtrace->auxtrace_type = auxtrace_info->type;
 	rvtrace->timeless_decoding = rvtrace_is_timeless_decoding(rvtrace);
+
+	/* Load machine code binary if specified */
+	if (symbol_conf.machine_code_name) {
+		rvtrace->machine_code_dso = dso__new(symbol_conf.machine_code_name);
+		if (rvtrace->machine_code_dso) {
+			/* Load the binary file for reading machine mode code.
+			 * dso__load validates ELF format and loads symbols.
+			 */
+			if (dso__load(rvtrace->machine_code_dso, NULL) < 0) {
+				pr_err("Failed to load machine code binary: %s\n",
+					symbol_conf.machine_code_name);
+				dso__put(rvtrace->machine_code_dso);
+				rvtrace->machine_code_dso = NULL;
+			}
+		}
+	}
 
 	rvtrace->auxtrace.process_event = rvtrace_process_event;
 	rvtrace->auxtrace.process_auxtrace_event = rvtrace_process_auxtrace_event;
