@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Copyright (c) 2025 Spacemit, Inc */
+
+#include "k3_com260.dtsi"
+#include "k3-camera.dtsi"
+
+/ {
+	model = "SpacemiT K3 Com260 IFX TQ";
+	compatible = "spacemit,k3-com260-ifx-tq";
+
+	pcie0_pwr_en: regulator-pcie0-pwr-en {
+		compatible = "regulator-fixed";
+		regulator-name = "pcie0 pwr en";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcie0_pwr_en_cfg>;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&gpio 2 9 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+		status = "okay";
+	};
+
+	hub_reset: hub-reset {
+		compatible = "regulator-fixed";
+		regulator-name = "hub-reset";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		regulator-boot-on;
+		gpio = <&gpio 1 21 0>;
+	};
+};
+
+&pinctrl {
+	pcie0_pwr_en_cfg: pcie0-pwr-en-cfg {
+		pcie0-pwr-en-pins {
+			pinmux = <K3_PADCONF(73, 0)>;
+
+			bias-pull-up;
+			drive-strength = <33>;
+			power-source = <1800>;
+		};
+	};
+
+	can2-1-cfg {
+		can2-0-pins {
+			power-source = <3300>;
+		};
+	};
+};
+
+&eth1 {
+	phy-handle = <&gmac1_phy>;
+
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "snps,dwmac-mdio";
+
+		gmac1_phy: ethernet-phy@1 {
+			compatible = "ethernet-phy-id001c.c916",
+				     "ethernet-phy-ieee802.3-c22";
+			reg = <1>;
+			realtek,aldps-enable;
+			realtek,clkout-disable;
+
+			leds {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				led@1 {
+					reg = <1>;
+					function = LED_FUNCTION_LAN;
+					color = <LED_COLOR_ID_GREEN>;
+					default-state = "keep";
+				};
+
+				led@2 {
+					reg = <2>;
+					function = LED_FUNCTION_LAN;
+					color = <LED_COLOR_ID_YELLOW>;
+					default-state = "keep";
+				};
+			};
+		};
+	};
+};
+
+&sdcard {
+	pinctrl-names = "default","uhs","debug";
+	pinctrl-2 = <&mmc1_jtag_cfg &mmc1_cd_cfg>;
+};
+
+&pcie0_rc {
+	vpcie3v3-supply = <&pcie0_pwr_en>;
+};
+
+&usb3_porta {
+	reset-on-resume;
+};
+
+&usb3_portb {
+	reset-on-resume;
+	/* wakeup-source; */
+
+	/* VL817 USB2.0 hub (4 ports) */
+	hub_2_0: hub@1 {
+		compatible = "usb2109,2817";
+		reg = <1>;
+		peer-hub = <&hub_3_0>;
+		vdd-supply = <&hub_reset>;
+	};
+
+	/* VL817 USB3.0 hub (4 ports) */
+	hub_3_0: hub@2 {
+		compatible = "usb2109,817";
+		reg = <2>;
+		peer-hub = <&hub_2_0>;
+	};
+};
+
+&i2c0 {
+	tcpc@25 {
+		suspend-vbus-off;
+	};
+};
+
+&i2c3 {
+	status = "disabled";
+};
+
+&i2c5 {
+	status = "disabled";
+};
+
+&flexcan2 {
+	clock-frequency = <80000000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&can2_1_cfg>;
+	status = "okay";
+};
+
+&rpmi_regulator {
+	edcdc2: edcdc2 {
+		regulator-max-microvolt = <1100000>;
+	};
+
+	edcdc1: edcdc1 {
+		regulator-max-microvolt = <1100000>;
+	};
+};
