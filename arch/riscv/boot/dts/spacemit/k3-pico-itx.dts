@@ -29,14 +29,14 @@
 &rpmi_regulator {
 	adcdc2: adcdc2 {
 		regulator-min-microvolt = <540000>;
-		regulator-max-microvolt = <1000000>;
+		regulator-max-microvolt = <1100000>;
 		regulator-always-on;
 		regulator-boot-on;
 	};
 
 	adcdc1: adcdc1 {
 		regulator-min-microvolt = <540000>;
-		regulator-max-microvolt = <1000000>;
+		regulator-max-microvolt = <1100000>;
 		regulator-always-on;
 		regulator-boot-on;
 	};
