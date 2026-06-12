@@ -21,6 +21,19 @@
 #define TURBO0_FREQUENCY		(1000000000)
 #define STABLE_FREQUENCY		(819200000)
 
+/*
+ * SVT-DRO thresholds for OPP table selection:
+ *   table0: SVT-DRO <= 207  (201 < SVT <= 207)
+ *   table1: SVT-DRO <= 211  (207 < SVT <= 211)
+ *   table2: SVT-DRO >  211
+ */
+#define SVT_DRO_THRESHOLD_0		(207)
+#define SVT_DRO_THRESHOLD_1		(211)
+
+#define FREQ_TABLE_0			(0)
+#define FREQ_TABLE_1			(1)
+#define FREQ_TABLE_2			(2)
+
 static int spacemit_processor_notifier(struct notifier_block *nb,
                                   unsigned long event, void *data)
 {
@@ -62,11 +75,10 @@ static int spacemit_processor_notifier(struct notifier_block *nb,
 			}
 
 			if (freqs->new * 1000 > TURBO0_FREQUENCY) {
-				/* 2.4G */
+				/* set pll_clst0/1 to target frequency */
 				if (!IS_ERR(pll_clst0))
 					clk_set_rate(pll_clst0, freqs->new * 1000);
 
-				/* 2.4G */
 				if (!IS_ERR(pll_clst1))
 					clk_set_rate(pll_clst1, freqs->new * 1000);
 			}
@@ -88,6 +100,7 @@ static int spacemit_processor_notifier(struct notifier_block *nb,
 
 	return 0;
 }
+
 static struct notifier_block spacemit_processor_notifier_block = {
        .notifier_call = spacemit_processor_notifier,
 };
@@ -118,10 +131,92 @@ static struct notifier_block spacemit_policy_notifier_block = {
        .notifier_call = spacemit_policy_notifier,
 };
 
-static int spacemit_dt_cpufreq_pre_early_init(struct device *dev, int cpu)
+/*
+ * Custom indexed OPP sharing helpers — mirrors the K1X approach so each
+ * CPU can carry multiple operating-points-v2 phandles and the driver picks
+ * the right one at boot based on SVT-DRO.
+ */
+static int _dev_pm_opp_of_get_sharing_cpus(struct device *cpu_dev,
+				   struct cpumask *cpumask, int index)
+{
+	struct device_node *np, *tmp_np, *cpu_np;
+	int cpu, ret = 0;
+
+	np = of_parse_phandle(cpu_dev->of_node, "operating-points-v2", index);
+	if (!np) {
+		dev_dbg(cpu_dev, "%s: Couldn't find opp node.\n", __func__);
+		return -ENOENT;
+	}
+
+	cpumask_set_cpu(cpu_dev->id, cpumask);
+
+	if (!of_property_read_bool(np, "opp-shared"))
+		goto put_cpu_node;
+
+	for_each_possible_cpu(cpu) {
+		if (cpu == cpu_dev->id)
+			continue;
+
+		cpu_np = of_cpu_device_node_get(cpu);
+		if (!cpu_np) {
+			dev_err(cpu_dev, "%s: failed to get cpu%d node\n",
+				__func__, cpu);
+			ret = -ENOENT;
+			goto put_cpu_node;
+		}
+
+		tmp_np = of_parse_phandle(cpu_np, "operating-points-v2", index);
+		of_node_put(cpu_np);
+		if (!tmp_np)
+			continue;
+
+		if (np == tmp_np)
+			cpumask_set_cpu(cpu, cpumask);
+
+		of_node_put(tmp_np);
+	}
+
+put_cpu_node:
+	of_node_put(np);
+	return ret;
+}
+
+static int _dev_pm_opp_of_cpumask_add_table(const struct cpumask *cpumask, int index)
+{
+	struct device *cpu_dev;
+	int cpu, ret;
+
+	if (WARN_ON(cpumask_empty(cpumask)))
+		return -ENODEV;
+
+	for_each_cpu(cpu, cpumask) {
+		cpu_dev = get_cpu_device(cpu);
+		if (!cpu_dev) {
+			pr_err("%s: failed to get cpu%d device\n", __func__, cpu);
+			ret = -ENODEV;
+			goto remove_table;
+		}
+
+		ret = dev_pm_opp_of_add_table_indexed(cpu_dev, index);
+		if (ret) {
+			pr_debug("%s: couldn't find opp table for cpu:%d, %d\n",
+				 __func__, cpu, ret);
+			goto remove_table;
+		}
+	}
+
+	return 0;
+
+remove_table:
+	_dev_pm_opp_cpumask_remove_table(cpumask, cpu);
+	return ret;
+}
+
+static int spacemit_dt_cpufreq_pre_early_init(struct device *dev, int cpu, int index)
 {
 	struct private_data *priv;
 	struct device *cpu_dev;
+	struct opp_table *opp_table;
 	const char *reg_name[] = { "clst", NULL };
 	const char *clk_name[] = { "cls0", "cls1", NULL };
 	struct dev_pm_opp_config config = {
@@ -149,45 +244,49 @@ static int spacemit_dt_cpufreq_pre_early_init(struct device *dev, int cpu)
 	cpumask_set_cpu(cpu, priv->cpus);
 	priv->cpu_dev = cpu_dev;
 
+	/* A100 cluster (cpu8+) has no voltage regulator */
 	if (cpu >= 8)
 		config.regulator_names = NULL;
+
 	/*
-	 * OPP layer will be taking care of regulators now, but it needs to know
-	 * the name of the regulator first.
+	 * dev_pm_opp_set_config() always looks up opp_table at index=0,
+	 * so opp_table->np would point to the wrong DT node when index>0.
+	 * Pre-create the table with the correct index first so that np is
+	 * set correctly; dev_pm_opp_set_config() will reuse the existing
+	 * table via _find_opp_table_unlocked().
 	 */
+	/*
+	 * dev_pm_opp_set_config() always looks up opp_table at index=0,
+	 * so opp_table->np would point to the wrong DT node when index>0.
+	 * Pre-create the table with the correct index first so that np is
+	 * set correctly; keep the reference alive until after set_config()
+	 * so the table is not freed before set_config finds it via
+	 * _find_opp_table_unlocked().
+	 */
+	opp_table = _add_opp_table_indexed(cpu_dev, index, false);
+	if (IS_ERR(opp_table)) {
+		ret = PTR_ERR(opp_table);
+		goto free_cpumask;
+	}
+
 	priv->opp_token = dev_pm_opp_set_config(cpu_dev, &config);
+	dev_pm_opp_put_opp_table(opp_table);
 	if (priv->opp_token < 0) {
 		ret = -EPROBE_DEFER;
 		goto free_cpumask;
 	}
 
-	/* Get OPP-sharing information from "operating-points-v2" bindings */
-	ret = dev_pm_opp_of_get_sharing_cpus(cpu_dev, priv->cpus);
+	ret = _dev_pm_opp_of_get_sharing_cpus(cpu_dev, priv->cpus, index);
 	if (ret)
 		goto out;
 
-	/*
-	 * Initialize OPP tables for all priv->cpus. They will be shared by
-	 * all CPUs which have marked their CPUs shared with OPP bindings.
-	 *
-	 * For platforms not using operating-points-v2 bindings, we do this
-	 * before updating priv->cpus. Otherwise, we will end up creating
-	 * duplicate OPPs for the CPUs.
-	 *
-	 * OPPs might be populated at runtime, don't fail for error here unless
-	 * it is -EPROBE_DEFER.
-	 */
-	ret = dev_pm_opp_of_cpumask_add_table(priv->cpus);
+	ret = _dev_pm_opp_of_cpumask_add_table(priv->cpus, index);
 	if (!ret) {
 		priv->have_static_opps = true;
 	} else if (ret == -EPROBE_DEFER) {
 		goto out;
 	}
 
-	/*
-	 * The OPP table must be initialized, statically or dynamically, by this
-	 * point.
-	 */
 	ret = dev_pm_opp_get_opp_count(cpu_dev);
 	if (ret <= 0) {
 		dev_err(cpu_dev, "OPP table can't be empty\n");
@@ -216,13 +315,38 @@ free_cpumask:
 
 static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 {
-	int cpu;
+	int cpu, ret = 0;
+	int index = FREQ_TABLE_0;
+	struct device_node *cpus;
+	u32 svt_dro = 0;
 
 	if (strncmp(pdev->name, "cpufreq-dt", 10) != 0)
 		return 0;
 
-	for_each_possible_cpu(cpu)
-		spacemit_dt_cpufreq_pre_early_init(&pdev->dev, cpu);
+	cpus = of_find_node_by_path("/cpus");
+	if (!cpus || of_property_read_u32(cpus, "svt-dro", &svt_dro)) {
+		pr_info("Spacemit K3: no 'svt-dro' in DTS, using default OPP table0\n");
+		svt_dro = 0;
+	}
+	of_node_put(cpus);
+
+	if (svt_dro <= SVT_DRO_THRESHOLD_0)
+		index = FREQ_TABLE_0;
+	else if (svt_dro <= SVT_DRO_THRESHOLD_1)
+		index = FREQ_TABLE_1;
+	else
+		index = FREQ_TABLE_2;
+
+	pr_info("Spacemit K3: SVT-DRO=%u, selecting OPP table%d\n", svt_dro, index);
+
+	for_each_possible_cpu(cpu) {
+		/* A100 cluster (cpu8+) only has a single OPP table */
+		int cpu_index = (cpu >= 8) ? FREQ_TABLE_0 : index;
+
+		ret = spacemit_dt_cpufreq_pre_early_init(&pdev->dev, cpu, cpu_index);
+		if (ret)
+			pr_err("Spacemit K3: cpu%d OPP init failed (%d)\n", cpu, ret);
+	}
 
 	return 0;
 }
@@ -238,7 +362,6 @@ static int __device_notifier_call(struct notifier_block *nb,
 	case BUS_NOTIFY_UNBOUND_DRIVER:
 		break;
 	case BUS_NOTIFY_BIND_DRIVER:
-		/* here */
 		spacemit_dt_cpufreq_pre_probe(pdev);
 		break;
 	case BUS_NOTIFY_ADD_DEVICE:
