@@ -313,6 +313,10 @@ free_cpumask:
 	return ret;
 }
 
+static struct cpufreq_dt_platform_data spacemit_cpufreq_dt_pdata = {
+	.have_governor_per_policy = true,
+};
+
 static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 {
 	int cpu, ret = 0;
@@ -322,6 +326,8 @@ static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 
 	if (strncmp(pdev->name, "cpufreq-dt", 10) != 0)
 		return 0;
+
+	pdev->dev.platform_data = &spacemit_cpufreq_dt_pdata;
 
 	cpus = of_find_node_by_path("/cpus");
 	if (!cpus || of_property_read_u32(cpus, "svt-dro", &svt_dro)) {
