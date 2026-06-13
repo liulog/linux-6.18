@@ -33,6 +33,9 @@
 #define FREQ_TABLE_0			(0)
 #define FREQ_TABLE_1			(1)
 #define FREQ_TABLE_2			(2)
+#define FREQ_TABLE_3			(3)
+
+#define REGULATOR_MAX_UV_THRESHOLD	(1100000)
 
 static int spacemit_processor_notifier(struct notifier_block *nb,
                                   unsigned long event, void *data)
@@ -313,6 +316,10 @@ free_cpumask:
 	return ret;
 }
 
+static struct cpufreq_dt_platform_data spacemit_cpufreq_dt_pdata = {
+	.have_governor_per_policy = true,
+};
+
 static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 {
 	int cpu, ret = 0;
@@ -322,6 +329,8 @@ static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 
 	if (strncmp(pdev->name, "cpufreq-dt", 10) != 0)
 		return 0;
+
+	pdev->dev.platform_data = &spacemit_cpufreq_dt_pdata;
 
 	cpus = of_find_node_by_path("/cpus");
 	if (!cpus || of_property_read_u32(cpus, "svt-dro", &svt_dro)) {
@@ -338,6 +347,37 @@ static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 		index = FREQ_TABLE_2;
 
 	pr_info("Spacemit K3: SVT-DRO=%u, selecting OPP table%d\n", svt_dro, index);
+
+	/*
+	 * Override to table3 when the core regulator max voltage is below
+	 * 1.1 V — covers both rpmi_regulator edcdc1 and adcdc1.
+	 */
+	{
+		static const char * const reg_paths[] = {
+			"/soc/rpmi_regulator@0/edcdc1",
+			"/soc/rpmi_regulator@0/adcdc1",
+		};
+		int i;
+
+		for (i = 0; i < ARRAY_SIZE(reg_paths); i++) {
+			struct device_node *reg_np;
+			u32 max_uv = 0;
+
+			reg_np = of_find_node_by_path(reg_paths[i]);
+			if (!reg_np)
+				continue;
+
+			if (!of_property_read_u32(reg_np, "regulator-max-microvolt", &max_uv) &&
+			    max_uv < REGULATOR_MAX_UV_THRESHOLD) {
+				pr_info("Spacemit K3: %s max-microvolt=%u < %u, overriding to OPP table3\n",
+					reg_paths[i], max_uv, REGULATOR_MAX_UV_THRESHOLD);
+				of_node_put(reg_np);
+				index = FREQ_TABLE_3;
+				break;
+			}
+			of_node_put(reg_np);
+		}
+	}
 
 	for_each_possible_cpu(cpu) {
 		/* A100 cluster (cpu8+) only has a single OPP table */
