@@ -2097,8 +2097,16 @@ static int soc_dp_conn_get_modes(struct drm_connector *connector)
 	count = drm_edid_connector_add_modes(connector);
 
 	list_for_each_entry_safe(mode, tmp, &connector->probed_modes, head) {
-		if (mode->hdisplay == 2560) {
+		if (mode->hdisplay >= 2560) {
 			if (drm_mode_vrefresh(mode) > 90) {
+				list_del(&mode->head);
+				drm_mode_destroy(dev, mode);
+				count--;
+			}
+		}
+
+		if (mode->hdisplay >= 3840) {
+			if (drm_mode_vrefresh(mode) > 60) {
 				list_del(&mode->head);
 				drm_mode_destroy(dev, mode);
 				count--;
