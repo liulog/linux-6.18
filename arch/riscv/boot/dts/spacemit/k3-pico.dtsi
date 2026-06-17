@@ -172,20 +172,24 @@
 
 		gmac0-0-pins {
 			power-source = <1800>;
+			drive-strength = <11>;
 		};
 
 		gmac0-1-pins {
 			power-source = <1800>;
+			drive-strength = <11>;
 		};
 
 		gmac0-3-pins {
 			power-source = <1800>;
+			drive-strength = <11>;
 		};
 
 		gmac0-6-pins {
 			pinmux = <K3_PADCONF(15, 0)>;
 
 			bias-disable;
+			drive-strength = <11>;
 			power-source = <1800>;
 		};
 	};
@@ -193,6 +197,7 @@
 	i2c2-1-cfg {
 		i2c2-0-pins {
 			power-source = <1800>;
+			drive-strength = <9>;		/* DS4 */
 		};
 	};
 
@@ -227,6 +232,7 @@
 	qspi-cfg {
 		qspi-pins {
 			power-source = <1800>;
+			drive-strength = <11>;
 		};
 	};
 
@@ -333,6 +339,16 @@
 	sspa1_1_cfg: sspa1-1-cfg {
 		sspa1-0-pins {
 			power-source = <3300>;
+		};
+	};
+
+	espi0_2_cfg: espi0-2-cfg {
+		espi0-0-pins {
+			drive-strength = <9>;		/* DS4 */
+		};
+
+		espi0-1-pins {
+			drive-strength = <9>;		/* DS4 */
 		};
 	};
 };
