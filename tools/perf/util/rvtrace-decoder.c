@@ -11,8 +11,9 @@
 #include <linux/types.h>
 
 #include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <elf.h>
-#include <gelf.h>
 
 #include "auxtrace.h"
 #include "color.h"
@@ -30,6 +31,7 @@
 #include "util.h"
 #include "dso.h"
 #include "symbol.h"
+#include "maps.h"
 #include "addr_location.h"
 #include <inttypes.h>
 #include "util/synthetic-events.h"
@@ -56,7 +58,8 @@ struct rvtrace_auxtrace {
 	u64 branches_id;
 	u64 **metadata;
 	unsigned int pmu_type;
-	struct dso *machine_code_dso;
+	struct dso *firmware_dso;
+	struct maps *firmware_maps;
 };
 
 struct rvtrace_queue {
@@ -84,105 +87,116 @@ static void rvtrace_set_thread(struct rvtrace_queue *rvtraceq,
 		rvtraceq->thread = machine__idle_thread(rvtrace->machine);
 }
 
-/* Map physical address to file offset by reading ELF program headers */
-static u64 rvtrace_map_paddr_to_offset(const char *filename, u64 paddr, u64 base)
+/*
+ * Register firmware ELF PT_LOAD segments as maps in the machine's kernel maps,
+ * so that perf script can resolve symbols for M-mode (machine mode) samples.
+ *
+ * base is the absolute physical load address of the firmware (from --firmware-base).
+ * p_paddr in the ELF is the relative address within the firmware image.
+ *
+ *   map->start = base + p_paddr
+ *   map->end   = base + p_paddr + p_memsz
+ *   map->pgoff = p_offset
+ *
+ * map__map_ip(paddr) = paddr - start + pgoff = p_offset + (paddr - base - p_paddr)
+ */
+static int rvtrace_register_firmware_maps(struct rvtrace_auxtrace *rvtrace,
+					      struct dso *dso, u64 base)
 {
-	FILE *fp;
-	Elf *elf;
-	GElf_Ehdr ehdr;
-	GElf_Phdr phdr;
-	size_t i, phdrnum;
-	u64 file_offset = (u64)-1;
-	u64 relative_paddr;
+	Elf64_Ehdr ehdr;
+	Elf64_Phdr phdr;
+	int fd, i, ret = 0;
+	const char *filename = dso__long_name(dso);
 
-	if (!filename || paddr < base)
-		return (u64)-1;
+	fd = open(filename, O_RDONLY);
+	if (fd < 0)
+		return -1;
 
-	/* Convert absolute physical address to relative address using base */
-	relative_paddr = paddr - base;
-
-	fp = fopen(filename, "r");
-	if (!fp)
-		return (u64)-1;
-
-	elf_version(EV_CURRENT);
-	elf = elf_begin(fileno(fp), ELF_C_READ, NULL);
-	if (!elf)
-		goto out_fclose;
-
-	if (!gelf_getehdr(elf, &ehdr))
-		goto out_elf_end;
-
-	if (elf_getphdrnum(elf, &phdrnum) != 0)
-		goto out_elf_end;
-
-	/* Find the program header that contains this relative physical address */
-	for (i = 0; i < phdrnum; i++) {
-		if (!gelf_getphdr(elf, i, &phdr))
-			continue;
-
-		/* Check if relative address is within this segment */
-		if (phdr.p_type == PT_LOAD &&
-		    relative_paddr >= phdr.p_paddr &&
-		    relative_paddr < phdr.p_paddr + phdr.p_memsz) {
-			/* Calculate file offset */
-			file_offset = phdr.p_offset + (relative_paddr - phdr.p_paddr);
-			break;
-		}
+	if (pread(fd, &ehdr, sizeof(ehdr), 0) != sizeof(ehdr)) {
+		ret = -1;
+		goto out;
 	}
 
-out_elf_end:
-	elf_end(elf);
-out_fclose:
-	fclose(fp);
-	return file_offset;
+	for (i = 0; i < ehdr.e_phnum; i++) {
+		struct map *map;
+
+		if (pread(fd, &phdr, sizeof(phdr),
+			  ehdr.e_phoff + (u64)i * ehdr.e_phentsize) != sizeof(phdr))
+			continue;
+
+		if (phdr.p_type != PT_LOAD || phdr.p_memsz == 0)
+			continue;
+
+		map = map__new2(base + phdr.p_paddr, dso);
+		if (!map) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		map__set_end(map, base + phdr.p_paddr + phdr.p_memsz);
+		map__set_pgoff(map, phdr.p_offset);
+
+		pr_debug("rvtrace: machine code map [%#"PRIx64"-%#"PRIx64"] pgoff=%#"PRIx64" %s\n",
+			 base + phdr.p_paddr, base + phdr.p_paddr + phdr.p_memsz,
+			 (u64)phdr.p_offset, dso__long_name(dso));
+
+		ret = maps__insert(rvtrace->firmware_maps, map);
+		map__put(map);
+		if (ret)
+			goto out;
+	}
+out:
+	close(fd);
+	return ret;
+}
+
+static int rvtrace_insert_map_cb(struct map *map, void *data)
+{
+	struct maps *kmaps = data;
+
+	maps__insert(kmaps, map);
+	return 0;
 }
 
 static u32 rvtrace_machine_mode_access(struct rvtrace_queue *rvtraceq, u64 address,
 				       size_t size, u8 *buffer)
 {
+	struct machine *machine = rvtraceq->rvtrace->machine;
+	struct map *map;
 	struct dso *dso;
+	u64 offset;
 	int len;
-	u64 file_offset;
-	u64 base_addr = 0;
 
-	/* Parse machine_code_base if provided */
-	if (symbol_conf.machine_code_base) {
-		base_addr = strtoull(symbol_conf.machine_code_base, NULL, 0);
-	}
-
-	/* Try to read from machine_code_dso if available */
-	if (rvtraceq && rvtraceq->rvtrace->machine_code_dso) {
-		dso = rvtraceq->rvtrace->machine_code_dso;
-
-		/* Map physical address to file offset using ELF program headers */
-		file_offset = rvtrace_map_paddr_to_offset(dso__long_name(dso), address, base_addr);
-		if (file_offset != (u64)-1) {
-			len = dso__data_read_offset(dso, rvtraceq->rvtrace->machine,
-						   file_offset, buffer, size);
-			if (len > 0) {
-				return len;
-			}
-		} else {
-			pr_debug("Failed to map physical address 0x%lx to file offset in %s\n",
-				 address, dso__long_name(dso));
-		}
-
-		/* DSO read failed, warn user once */
-		ui__warning_once("RISC-V Nexus Trace: Failed to read machine mode code at address 0x%lx from DSO.\n"
-				 "                  Use option '-m /path/to/machine-code --machine-code-base 0xBASE'\n"
-				 "                  to specify the binary and its base address.\n",
-				 address);
-	} else {
-		/* No machine code DSO provided, warn user once */
+	if (!rvtraceq->rvtrace->firmware_dso) {
 		ui__warning_once("RISC-V Nexus Trace: Machine mode code binary not provided.\n"
 				 "                  Failed to read address 0x%lx.\n"
-				 "                  Use option '-m /path/to/machine-code --machine-code-base 0xBASE'\n"
+				 "                  Use option '-m /path/to/firmware --firmware-base 0xBASE'\n"
 				 "                  to specify the binary and its base address.\n",
 				 address);
+		return 0;
 	}
 
-	return 0;
+	map = maps__find(rvtraceq->rvtrace->firmware_maps, address);
+	if (!map)
+		return 0;
+
+	/*
+	 * Insert firmware maps into kernel maps for symbol resolution.
+	 * Re-insert if kcore loading has removed them (kcore calls
+	 * maps__remove_maps which clears all non-kernel maps).
+	 */
+	if (!maps__find(machine__kernel_maps(machine), address)) {
+		maps__for_each_map(rvtraceq->rvtrace->firmware_maps,
+				   rvtrace_insert_map_cb,
+				   machine__kernel_maps(machine));
+		map__load(map);
+	}
+
+	dso = map__dso(map);
+	offset = map__map_ip(map, address);
+	len = dso__data_read_offset(dso, machine, offset, buffer, size);
+	map__put(map);
+	return len > 0 ? len : 0;
 }
 
 static u32 rvtrace_mem_access(void *data, u64 address, enum riscv_privilege_mode prv,
@@ -202,7 +216,7 @@ static u32 rvtrace_mem_access(void *data, u64 address, enum riscv_privilege_mode
 
 	addr_location__init(&al);
 
-	/* If the riscv_privilege_mode is machine mode, access physical address */
+	/* M-mode uses physical addresses, handle separately via kernel maps */
 	if (prv == RISCV_PRIV_MACHINE_MODE)
 		return rvtrace_machine_mode_access(rvtraceq, address, size, buffer);
 
@@ -781,8 +795,9 @@ static void rvtrace_free(struct perf_session *session)
 		zfree(&rvtrace->metadata[i]);
 
 	zfree(&rvtrace->metadata);
-	if (rvtrace->machine_code_dso)
-		dso__put(rvtrace->machine_code_dso);
+	if (rvtrace->firmware_dso)
+		dso__put(rvtrace->firmware_dso);
+	maps__put(rvtrace->firmware_maps);
 	zfree(&rvtrace);
 }
 
@@ -1066,18 +1081,26 @@ int rvtrace_process_auxtrace_info(union perf_event *event,
 	rvtrace->auxtrace_type = auxtrace_info->type;
 	rvtrace->timeless_decoding = rvtrace_is_timeless_decoding(rvtrace);
 
-	/* Load machine code binary if specified */
-	if (symbol_conf.machine_code_name) {
-		rvtrace->machine_code_dso = dso__new(symbol_conf.machine_code_name);
-		if (rvtrace->machine_code_dso) {
-			/* Load the binary file for reading machine mode code.
-			 * dso__load validates ELF format and loads symbols.
-			 */
-			if (dso__load(rvtrace->machine_code_dso, NULL) < 0) {
-				pr_err("Failed to load machine code binary: %s\n",
-					symbol_conf.machine_code_name);
-				dso__put(rvtrace->machine_code_dso);
-				rvtrace->machine_code_dso = NULL;
+	/* Load firmware binary if specified */
+	if (symbol_conf.firmware_name) {
+		u64 base_addr = 0;
+
+		if (symbol_conf.firmware_base)
+			base_addr = strtoull(symbol_conf.firmware_base, NULL, 0);
+
+		rvtrace->firmware_dso = dso__new(symbol_conf.firmware_name);
+		if (rvtrace->firmware_dso) {
+			rvtrace->firmware_maps = maps__new(rvtrace->machine);
+			if (!rvtrace->firmware_maps ||
+			    rvtrace_register_firmware_maps(rvtrace,
+							       rvtrace->firmware_dso,
+							       base_addr) < 0) {
+				pr_err("Failed to register machine code maps: %s\n",
+					symbol_conf.firmware_name);
+				dso__put(rvtrace->firmware_dso);
+				rvtrace->firmware_dso = NULL;
+				maps__put(rvtrace->firmware_maps);
+				rvtrace->firmware_maps = NULL;
 			}
 		}
 	}
