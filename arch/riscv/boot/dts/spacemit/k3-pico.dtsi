@@ -87,15 +87,6 @@
 		shutdown-gpios = <&gpio 1 3 GPIO_ACTIVE_HIGH>;
 	};
 
-	rfkill-usb-bt {
-		compatible = "rfkill-gpio";
-		label = "rfkill-usb-bt";
-		pinctrl-names = "default";
-		pinctrl-0 = <&bt_en_cfg>;
-		radio-type = "bluetooth";
-		shutdown-gpios = <&gpio 0 30 GPIO_ACTIVE_HIGH>;
-	};
-
 	rfkill-usb-wwan {
 		compatible = "rfkill-gpio";
 		label = "m.2 WWAN"; /* B-Key */
@@ -299,8 +290,8 @@
 		};
 	};
 
-	bt_en_cfg: bt-en-cfg {
-		bt-en-pins {
+	bt_reset_cfg: bt-reset-cfg {
+		bt-reset-pins {
 			pinmux = <K3_PADCONF(30, 0)>;
 
 			bias-pull-up;
@@ -464,13 +455,25 @@
 
 &usb3_portc {
 	/* Bluetooth, only enable USB2 phy */
+	#address-cells = <1>;
+	#size-cells = <0>;
 	/delete-property/ phys;
 	/delete-property/ phy-names;
 	maximum-speed = "high-speed";
 	reset-on-resume;
 	phys = <&usb3_portc_u2phy>;
 	phy-names = "usb2-phy";
+	pinctrl-names = "default";
+	pinctrl-0 = <&bt_reset_cfg>;
 	status = "okay";
+
+	bluetooth@1 {
+		/* RTL8852BE, reset must be deasserted before enumeration */
+		compatible = "usbbda,b85b";
+		reg = <1>;
+		vdd-supply = <&p3v3>;
+		reset-gpios = <&gpio 0 30 GPIO_ACTIVE_LOW>;
+	};
 };
 
 &usb3_portd_u2phy {
