@@ -15,15 +15,6 @@
 		radio-type = "wlan";
 		shutdown-gpios = <&gpio 2 9 GPIO_ACTIVE_LOW>;
 	};
-
-	rfkill-m2-bt {
-		compatible = "rfkill-gpio";
-		label = "rfkill-m2-bt";
-		pinctrl-names = "default";
-		pinctrl-0 = <&m2_wdis2_cfg>;
-		radio-type = "bluetooth";
-		shutdown-gpios = <&gpio 1 25 GPIO_ACTIVE_LOW>;
-	};
 };
 
 &pinctrl {

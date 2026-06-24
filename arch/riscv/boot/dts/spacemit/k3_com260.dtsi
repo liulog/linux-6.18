@@ -227,8 +227,8 @@
 		};
 	};
 
-	m2_wdis2_cfg: m2-wdis2-cfg {
-		m2-wdis2-pins {
+	bt_reset_cfg: bt-reset-cfg {
+		bt-reset-pins {
 			pinmux = <K3_PADCONF(57, 0)>;
 
 			bias-pull-up;
@@ -319,7 +319,19 @@
 
 &usb2_host {
 	/* M2 BT */
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&bt_reset_cfg>;
 	status = "okay";
+
+	bluetooth@1 {
+		/* RTL8852BE, reset must be deasserted before enumeration */
+		compatible = "usbbda,b85b";
+		reg = <1>;
+		vdd-supply = <&p3v3>;
+		reset-gpios = <&gpio 1 25 GPIO_ACTIVE_LOW>;
+	};
 };
 
 &usb3_porta_u2phy {
