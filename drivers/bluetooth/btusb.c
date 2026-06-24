@@ -3732,6 +3732,7 @@ static const struct of_device_id btusb_match_table[] = {
 	{ .compatible = "usb1286,204e" },
 	{ .compatible = "usbcf3,e300" }, /* QCA6174A */
 	{ .compatible = "usb4ca,301a" }, /* QCA6174A (Lite-On) */
+	{ .compatible = "usbbda,b85b" }, /* RTL8852BE */
 	{ }
 };
 MODULE_DEVICE_TABLE(of, btusb_match_table);
@@ -4110,8 +4111,18 @@ static int btusb_probe(struct usb_interface *intf,
 					GPIOD_OUT_LOW);
 	if (IS_ERR(reset_gpio)) {
 		err = PTR_ERR(reset_gpio);
-		goto out_free_dev;
-	} else if (reset_gpio) {
+		/*
+		 * The reset GPIO may already be held by another driver that is
+		 * responsible for powering on/resetting the device before
+		 * enumeration (e.g. onboard_usb_dev). In that case the line is
+		 * busy; carry on without an in-driver hard reset and fall back
+		 * to USB-level reset for recovery.
+		 */
+		if (err != -EBUSY)
+			goto out_free_dev;
+		dev_dbg(&data->udev->dev,
+			"reset GPIO busy, managed by another driver");
+	} else {
 		data->reset_gpio = reset_gpio;
 	}
 
