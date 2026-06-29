@@ -71,6 +71,10 @@
 	};
 };
 
+&usb3_porta_u3phy {
+	lfps-iset-lvl = <3>;
+};
+
 &usb3_porta {
 	reset-on-resume;
 };
