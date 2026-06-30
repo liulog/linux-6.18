@@ -112,14 +112,6 @@
 		status = "okay";
 	};
 
-	rfkill_bt: rfkill-bt {
-		compatible = "rfkill-gpio";
-		label = "spacemit-bt";
-		radio-type = "bluetooth";
-		shutdown-gpio = <&gpio 0 30 GPIO_ACTIVE_HIGH>;
-		status = "okay";
-	};
-
 	vcc_cam_dmic: vcc-cam-dmic {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc_cam_dmic";
@@ -258,9 +250,17 @@
 
 	rfkill_gpio_cfg: rfkill-gpio-cfg {
 		rfkill-pins {
-			pinmux = <K3_PADCONF(30, 0)>,	/* BT_EN: gpio30 */
-				 <K3_PADCONF(35, 0)>,	/* WLAN_W_DISABLE1: gpio35 */
+			pinmux = <K3_PADCONF(35, 0)>,	/* WLAN_W_DISABLE1: gpio35 */
 				 <K3_PADCONF(41, 0)>;	/* WLAN_PWREN: gpio41 */
+			bias-pull-up;
+			drive-strength = <33>;
+			power-source = <3300>;
+		};
+	};
+
+	bt_reset_cfg: bt-reset-cfg {
+		bt-reset-pins {
+			pinmux = <K3_PADCONF(30, 0)>;	/* BT_DIS#: gpio30 */
 			bias-pull-up;
 			drive-strength = <33>;
 			power-source = <3300>;
@@ -373,6 +373,8 @@
 	#address-cells = <1>;
 	#size-cells = <0>;
 	reset-on-resume;
+	pinctrl-names = "default";
+	pinctrl-0 = <&bt_reset_cfg>;
 	status = "okay";
 
 	/* Ensure no deferred probe cause USB disconnect */
@@ -381,6 +383,16 @@
 		/* FE1.1S USB2.0 hub (4 ports) */
 		compatible = "usb5e3,608";
 		reg = <1>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		bluetooth@1 {
+			/* RTL8852BE, reset must be deasserted before enumeration */
+			compatible = "usbbda,b85b";
+			reg = <1>;
+			vdd-supply = <&p3v3>;
+			reset-gpios = <&gpio 0 30 GPIO_ACTIVE_LOW>;
+		};
 	};
 };
 

@@ -59,6 +59,14 @@ static const struct onboard_dev_pdata realtek_rtl8188etv_data = {
 	.is_hub = false,
 };
 
+static const struct onboard_dev_pdata realtek_rtl8852be_data = {
+	.reset_us = 200000,
+	.power_on_delay_us = 500000,
+	.num_supplies = 1,
+	.supply_names = { "vdd" },
+	.is_hub = false,
+};
+
 static const struct onboard_dev_pdata ti_tusb8020b_data = {
 	.reset_us = 3000,
 	.num_supplies = 1,
@@ -160,6 +168,7 @@ static const struct of_device_id onboard_dev_match[] = {
 	{ .compatible = "usb20b1,0013", .data = &xmos_xvf3500_data, },
 	{ .compatible = "usb5986,1198", .data = &bison_intcamera_data, },
 	{ .compatible = "usb1a40,101", .data = &terminus_fe11s_data, },
+	{ .compatible = "usbbda,b85b", .data = &realtek_rtl8852be_data, },
 	{}
 };
 
