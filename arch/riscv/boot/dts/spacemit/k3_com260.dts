@@ -90,11 +90,6 @@
 	};
 };
 
-&sdcard {
-	pinctrl-names = "default","uhs","debug";
-	pinctrl-2 = <&mmc1_jtag_cfg &mmc1_cd_cfg>;
-};
-
 &usb3_porta {
 	reset-on-resume;
 };
