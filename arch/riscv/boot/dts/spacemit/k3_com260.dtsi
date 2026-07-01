@@ -330,7 +330,7 @@
 		compatible = "usbbda,b85b";
 		reg = <1>;
 		vdd-supply = <&p3v3>;
-		reset-gpios = <&gpio 1 25 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio 1 25 GPIO_ACTIVE_HIGH>;
 	};
 };
 

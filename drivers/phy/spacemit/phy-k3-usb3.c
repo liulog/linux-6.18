@@ -174,9 +174,14 @@
 #define RX_REG4_RDEG2(n) FIELD_PREP(GENMASK(2, 1), (n))
 #define RX_REG4_RDEG2_DEFAULT 0x2
 
+#define PCIE_PHY_RX_REG4	0x6c
+#define RX_REG4_LFPS_ISET_MASK	GENMASK(2, 0)
+#define RX_REG4_LFPS_ISET(n)	FIELD_PREP(RX_REG4_LFPS_ISET_MASK, (n))
+
 #define PHY_RXEQ_TIME 0xb4
 #define RXEQ_TIME_OVRD_AMP_SOC BIT(24)
-#define RXEQ_TIME_CFG_AMP_SOC(n) FIELD_PREP(GENMASK(23, 22), (n))
+#define RXEQ_TIME_CFG_AMP_SOC_MASK GENMASK(23, 22)
+#define RXEQ_TIME_CFG_AMP_SOC(n) FIELD_PREP(RXEQ_TIME_CFG_AMP_SOC_MASK, (n))
 #define AMP_SOC_650M 0x0
 #define AMP_SOC_800M 0x1
 #define AMP_SOC_870M 0x2
@@ -203,6 +208,11 @@ struct k3_usb3phy {
 	/* MMIO regmap (no errors) */
 	struct regmap *pmu;
 	struct regmap *apb_spare;
+
+	/* DT-configured PHY parameters */
+	u32 amp_lvl;
+	u32 lfps_iset_lvl;
+	bool ovrd_lfps_iset_lvl;
 
 	/* For USB only */
 	bool nop;
@@ -280,7 +290,7 @@ static int k3_usb3phy_init_single(struct k3_usb3phy *k3_phy,
 				   R_CAL_OVRD_TRIM_MASK,
 				   R_CAL_OVRD_TRIM_EN | R_CAL_OVRD_STABLE_VAL |
 				   R_CAL_OVRD_NTRIM_VAL(NTRIM_DEFAULT) |
-				   R_CAL_OVRD_PTRIM_VAL(PTRIM_DEFAULT) );
+				   R_CAL_OVRD_PTRIM_VAL(PTRIM_DEFAULT));
 		regmap_set_bits(apb_spare, APB_SPARE_RCAL_HSIO, R_CAL_OVRD_STABLE_EN);
 	}
 
@@ -311,9 +321,17 @@ static int k3_usb3phy_init_single(struct k3_usb3phy *k3_phy,
 		AFE_ADPT_RST_OVRD_EN | AFE_ADPT_RST_OVRD_VAL,
 		AFE_ADPT_RST_OVRD_EN | AFE_ADPT_RST_OVRD_VAL);
 
-	/* Override driver amplitude value to 900m */
-	regmap_set_bits(regm, PHY_RXEQ_TIME,
-			RXEQ_TIME_OVRD_AMP_SOC | RXEQ_TIME_CFG_AMP_SOC(AMP_SOC_900M));
+	/* Override driver amplitude, default set to 900M */
+	regmap_update_bits(regm, PHY_RXEQ_TIME,
+			   RXEQ_TIME_OVRD_AMP_SOC | RXEQ_TIME_CFG_AMP_SOC_MASK,
+			   RXEQ_TIME_OVRD_AMP_SOC |
+			   RXEQ_TIME_CFG_AMP_SOC(k3_phy->amp_lvl));
+
+	/* Override LFPS current from DT if specified */
+	if (k3_phy->ovrd_lfps_iset_lvl)
+		regmap_update_bits(regm, PCIE_PHY_RX_REG4,
+				   RX_REG4_LFPS_ISET_MASK,
+				   RX_REG4_LFPS_ISET(k3_phy->lfps_iset_lvl));
 
 	/* Configure RX parameters */
 	regmap_update_bits(regm, PHY_RX_REG_A, RX_REG0_MASK, RX_REG0_RLOAD);
@@ -337,7 +355,8 @@ static int k3_usb3phy_init_single(struct k3_usb3phy *k3_phy,
 	regmap_update_bits(regm, PHY_RX_REG_B, RX_REG6_MASK,
 			   RX_REG6_ADAPT_GAIN(RX_REG6_ADAPT_GAIN_DEFAULT) |
 			   RX_REG6_H1_REG(RX_REG6_H1_REG_DEFAULT));
-	dev_info(&phy->dev, "PUPHY Rx Reg Configured\n");
+	dev_info(&phy->dev, "PUPHY Rx Reg Configured, lfps-iset: %d, amp-lvl: %d\n",
+		 k3_phy->lfps_iset_lvl, k3_phy->amp_lvl);
 
 	/*
 	 * Inform PHY that all PLL-related configuration is done.
@@ -602,6 +621,23 @@ static int k3_usb3phy_probe(struct platform_device *pdev)
 		if (IS_ERR(k3_phy->regmap_bases[i]))
 			return dev_err_probe(dev, PTR_ERR(k3_phy->regmap_bases[i]),
 					     "Failed to init regmap\n");
+	}
+
+	k3_phy->amp_lvl = AMP_SOC_900M;
+	device_property_read_u32(dev, "amp-lvl", &k3_phy->amp_lvl);
+	if (k3_phy->amp_lvl > field_max(RXEQ_TIME_CFG_AMP_SOC_MASK))
+		return dev_err_probe(dev, -EINVAL,
+				     "amp-lvl %u out of range [0-%lu]\n",
+				     k3_phy->amp_lvl,
+				     field_max(RXEQ_TIME_CFG_AMP_SOC_MASK));
+
+	if (!device_property_read_u32(dev, "lfps-iset-lvl", &k3_phy->lfps_iset_lvl)) {
+		if (k3_phy->lfps_iset_lvl > field_max(RX_REG4_LFPS_ISET_MASK))
+			return dev_err_probe(dev, -EINVAL,
+					     "lfps-iset-lvl %u out of range [0-%lu]\n",
+					     k3_phy->lfps_iset_lvl,
+					     field_max(RX_REG4_LFPS_ISET_MASK));
+		k3_phy->ovrd_lfps_iset_lvl = true;
 	}
 
 	k3_phy->phy = devm_phy_create(dev, NULL, &k3_usb3phy_ops);
