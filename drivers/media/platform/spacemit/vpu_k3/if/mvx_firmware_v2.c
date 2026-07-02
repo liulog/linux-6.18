@@ -876,11 +876,55 @@ static int get_message_v2(struct mvx_fw *fw, struct mvx_fw_msg *msg)
 	size_t size = sizeof(fw_msg);
 	int ret;
 	struct mvx_session *session = fw->session;
+	bool treat_as_job_dequeued = false;
 
 	ret = read_message(fw, fw->msg_host, fw->msg_mve, &code, &fw_msg, &size, MVX_LOG_FWIF_CHANNEL_MESSAGE,
 			   fw->buf_attr[MVX_FW_REGION_MSG_MVE], fw->buf_attr[MVX_FW_REGION_MSG_HOST]);
 	if (ret <= 0)
 		return ret;
+
+	/*
+	 * Two consecutive SWITCHED_IN messages are not possible: the session
+	 * must be switched out before it can be switched in again. This is a
+	 * known firmware anomaly where a JOB_DEQUEUED message gets reported
+	 * with a SWITCHED_IN code. Treat the second SWITCHED_IN as
+	 * JOB_DEQUEUED to keep the session state machine consistent.
+	 */
+	if (code == MVE_RESPONSE_CODE_SWITCHED_IN && fw->last_msg_code == MVE_RESPONSE_CODE_SWITCHED_IN) {
+		MVX_LOG_PRINT(&mvx_log_if, MVX_LOG_ERROR,
+			"Two consecutive SWITCHED_IN fw messages, treating the second one as JOB_DEQUEUED.");
+		code = MVE_RESPONSE_CODE_JOB_DEQUEUED;
+		treat_as_job_dequeued = true;
+	}
+
+	/*
+	 * An IDLE immediately following a SWITCHED_IN is spurious: a session that
+	 * has just been switched in cannot already be idle. It is an artifact of
+	 * the message-queue desync (the firmware reading stale data). Treat it as
+	 * JOB_DEQUEUED so the host does not send a bogus IDLE_ACK that the
+	 * firmware rejects with "Got IDLE_ACK without sent IDLE".
+	 */
+	if (code == MVE_RESPONSE_CODE_IDLE && fw->last_msg_code == MVE_RESPONSE_CODE_SWITCHED_IN) {
+		MVX_LOG_PRINT(&mvx_log_if, MVX_LOG_ERROR,
+			"IDLE right after SWITCHED_IN, treating it as JOB_DEQUEUED.");
+		code = MVE_RESPONSE_CODE_JOB_DEQUEUED;
+		treat_as_job_dequeued = true;
+	}
+
+	if (treat_as_job_dequeued && size < sizeof(struct mve_response_job_dequeued)) {
+		struct mve_comm_area_host *host = fw->msg_host;
+		size_t missing = sizeof(struct mve_response_job_dequeued) - size;
+
+		host->out_rpos =
+			(host->out_rpos + DIV_ROUND_UP(missing, sizeof(uint32_t))) % MVE_COMM_QUEUE_SIZE_IN_WORDS;
+
+		if (fw->buf_attr[MVX_FW_REGION_MSG_HOST] == MVX_FW_BUF_CACHEABLE) {
+			wmb();
+			dma_sync_single_for_device(fw->dev, virt_to_phys(&host->out_rpos), sizeof(host->out_rpos),
+				DMA_TO_DEVICE);
+		}
+	}
+	fw->last_msg_code = code;
 
 	msg->code = MVX_FW_CODE_MAX;
 

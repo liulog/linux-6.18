@@ -757,6 +757,14 @@ struct mvx_fw {
 	DECLARE_HASHTABLE(rpc_mem, MVX_FW_HTABLE_BITS);
 	struct mutex rpcmem_mutex;
 	unsigned int msg_pending;
+
+	/**
+	 * Raw code of the previous message read from the firmware message
+	 * queue. Used to detect anomalies such as two consecutive
+	 * SWITCHED_IN messages.
+	 */
+	unsigned int last_msg_code;
+
 	uint32_t latest_used_region_protected_pages;
 	uint32_t latest_used_region_outbuf_pages;
 	phys_addr_t buf_pa_addr[MVX_FW_REGION_PRINT_RAM + 1];
