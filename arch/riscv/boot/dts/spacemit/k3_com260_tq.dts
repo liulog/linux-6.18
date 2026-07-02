@@ -104,11 +104,6 @@
 	};
 };
 
-&sdcard {
-	pinctrl-names = "default","uhs","debug";
-	pinctrl-2 = <&mmc1_jtag_cfg &mmc1_cd_cfg>;
-};
-
 &pcie0_rc {
 	vpcie3v3-supply = <&pcie0_pwr_en>;
 };

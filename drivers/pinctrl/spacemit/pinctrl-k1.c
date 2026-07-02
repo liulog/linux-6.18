@@ -306,10 +306,16 @@ static void spacemit_pctrl_dbg_show(struct pinctrl_dev *pctldev,
 {
 	struct spacemit_pinctrl *pctrl = pinctrl_dev_get_drvdata(pctldev);
 	const struct spacemit_pin *spin = spacemit_get_pin(pctrl, pin);
-	enum spacemit_pin_io_type type = spacemit_to_pin_io_type(spin);
+	enum spacemit_pin_io_type type;
 	void __iomem *reg;
 	u32 value;
 
+	if (!spin) {
+		seq_printf(seq, "pin %u not found", pin);
+		return;
+	}
+
+	type = spacemit_to_pin_io_type(spin);
 	seq_printf(seq, "offset: 0x%04x ", pctrl->data->pin_to_offset(pin));
 	seq_printf(seq, "type: %s ", io_type_desc[type]);
 
