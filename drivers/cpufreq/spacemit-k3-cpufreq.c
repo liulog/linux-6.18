@@ -18,6 +18,8 @@
 #include "../opp/opp.h"
 #include "cpufreq-dt.h"
 
+#define USING_OPP_TABLE3_BY_DEFAULT
+
 #define TURBO0_FREQUENCY		(1000000000)
 #define STABLE_FREQUENCY		(819200000)
 
@@ -378,6 +380,11 @@ static int spacemit_dt_cpufreq_pre_probe(struct platform_device *pdev)
 			of_node_put(reg_np);
 		}
 	}
+
+#ifdef USING_OPP_TABLE3_BY_DEFAULT
+	index = FREQ_TABLE_3;
+	pr_info("Spacemit K3: SVT-DRO=%u, overriding to OPP table%d\n", svt_dro, index);
+#endif
 
 	for_each_possible_cpu(cpu) {
 		/* A100 cluster (cpu8+) only has a single OPP table */
